@@ -1,0 +1,12 @@
+langchain-openai
+langchain-google-genai
+langchain-ollama
+python-dotenv
+deepagents
+chainlit
+langchain-mcp-adapters
+langgraph-checkpoint-sqlite
+aiosqlite
+SQLAlchemy
+openpyxl>=3.1.0
+gitpython>=3.1.40

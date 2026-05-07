@@ -1,0 +1,578 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Code Reviewer Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;min-height:100vh}
+.header{background:#1a1d2e;border-bottom:1px solid #2d3748;padding:16px 24px;display:flex;align-items:center;gap:12px}
+.header h1{font-size:18px;font-weight:600;color:#fff}
+.header .badge{background:#6366f1;color:#fff;padding:2px 8px;border-radius:12px;font-size:11px}
+.tabs{display:flex;gap:0;border-bottom:1px solid #2d3748;background:#1a1d2e;padding:0 24px}
+.tab{padding:12px 20px;cursor:pointer;font-size:13px;color:#94a3b8;border-bottom:2px solid transparent;transition:all .2s}
+.tab.active{color:#6366f1;border-bottom-color:#6366f1}
+.tab:hover{color:#e2e8f0}
+.page{display:none;padding:24px;max-width:1400px;margin:0 auto}
+.page.active{display:block}
+.grid{display:grid;gap:16px}
+.grid-4{grid-template-columns:repeat(4,1fr)}
+.grid-2{grid-template-columns:repeat(2,1fr)}
+.grid-3{grid-template-columns:repeat(3,1fr)}
+@media(max-width:900px){.grid-4,.grid-3{grid-template-columns:repeat(2,1fr)}.grid-2{grid-template-columns:1fr}}
+.card{background:#1a1d2e;border:1px solid #2d3748;border-radius:12px;padding:20px}
+.card h3{font-size:12px;color:#94a3b8;text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
+.card .value{font-size:28px;font-weight:700;color:#fff}
+.card .sub{font-size:12px;color:#64748b;margin-top:4px}
+.section-title{font-size:14px;font-weight:600;color:#e2e8f0;margin:24px 0 12px}
+.chart-card{background:#1a1d2e;border:1px solid #2d3748;border-radius:12px;padding:20px}
+.chart-card h3{font-size:13px;font-weight:600;color:#94a3b8;margin-bottom:16px}
+.chart-wrap{position:relative;height:220px}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:10px 12px;color:#64748b;font-weight:500;border-bottom:1px solid #2d3748;font-size:11px;text-transform:uppercase}
+td{padding:10px 12px;border-bottom:1px solid #1e2433;vertical-align:top}
+tr:hover td{background:#1e2433}
+.badge-crit{background:#7f1d1d;color:#fca5a5;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-high{background:#7c2d12;color:#fdba74;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-med{background:#713f12;color:#fde68a;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-low{background:#1e3a5f;color:#93c5fd;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-info{background:#1e293b;color:#94a3b8;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600}
+.badge-cat{background:#312e81;color:#a5b4fc;padding:2px 8px;border-radius:4px;font-size:11px}
+.badge-open{background:#1e3a5f;color:#93c5fd;padding:2px 6px;border-radius:4px;font-size:10px}
+.badge-fixed{background:#14532d;color:#86efac;padding:2px 6px;border-radius:4px;font-size:10px}
+.badge-dismissed{background:#1e293b;color:#64748b;padding:2px 6px;border-radius:4px;font-size:10px}
+.filters{display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:center}
+select,input{background:#0f1117;border:1px solid #2d3748;color:#e2e8f0;padding:6px 10px;border-radius:6px;font-size:13px}
+select:focus,input:focus{outline:none;border-color:#6366f1}
+button{background:#6366f1;color:#fff;border:none;padding:8px 16px;border-radius:6px;cursor:pointer;font-size:13px;font-weight:500}
+button:hover{background:#4f46e5}
+button.secondary{background:#1e2433;color:#94a3b8;border:1px solid #2d3748}
+button.secondary:hover{background:#2d3748;color:#e2e8f0}
+button.danger{background:#7f1d1d;color:#fca5a5;border:none}
+button.danger:hover{background:#991b1b}
+.finding-desc{color:#94a3b8;font-size:12px;margin-top:4px;max-width:400px}
+.finding-sug{color:#6ee7b7;font-size:12px;margin-top:4px;max-width:400px}
+.finding-file{font-family:monospace;color:#a5b4fc;font-size:12px}
+textarea{width:100%;background:#0f1117;border:1px solid #2d3748;color:#e2e8f0;padding:12px;border-radius:8px;font-size:13px;font-family:monospace;resize:vertical}
+.form-row{margin-bottom:16px}
+.form-row label{display:block;font-size:12px;color:#94a3b8;margin-bottom:6px}
+.empty{text-align:center;padding:48px;color:#475569;font-size:14px}
+.heatmap{display:grid;gap:4px;font-size:11px}
+.heatmap-cell{padding:8px;border-radius:4px;text-align:center;font-weight:600;min-width:60px}
+.panel{background:#1a1d2e;border:1px solid #2d3748;border-radius:12px;padding:20px;margin-top:16px}
+.panel h3{font-size:14px;font-weight:600;margin-bottom:12px;color:#e2e8f0}
+.clickable{cursor:pointer}
+.clickable:hover td{background:#252a3d!important}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🔍 Code Reviewer</h1>
+  <span class="badge">Dashboard</span>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="showTab('findings')">Findings</div>
+  <div class="tab" onclick="showTab('observability')">Observability</div>
+  <div class="tab" onclick="showTab('sessions')">Sessions</div>
+  <div class="tab" onclick="showTab('settings')">Settings</div>
+</div>
+
+<!-- FINDINGS TAB -->
+<div id="tab-findings" class="page active">
+  <div class="grid grid-4" style="margin-bottom:24px">
+    <div class="card"><h3>🔴 Critical</h3><div class="value" id="cnt-critical">—</div></div>
+    <div class="card"><h3>🟠 High</h3><div class="value" id="cnt-high">—</div></div>
+    <div class="card"><h3>🟡 Medium</h3><div class="value" id="cnt-medium">—</div></div>
+    <div class="card"><h3>🔵 Low / Info</h3><div class="value" id="cnt-low">—</div></div>
+  </div>
+
+  <div class="grid grid-3" style="margin-bottom:24px">
+    <div class="chart-card">
+      <h3>Findings by Category</h3>
+      <div class="chart-wrap"><canvas id="chart-category"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Findings by Criticality</h3>
+      <div class="chart-wrap"><canvas id="chart-criticality"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Findings Trend</h3>
+      <div class="chart-wrap"><canvas id="chart-trend"></canvas></div>
+    </div>
+  </div>
+
+  <div class="grid grid-2" style="margin-bottom:24px">
+    <div class="chart-card">
+      <h3>Top 10 Files by Finding Count</h3>
+      <div class="chart-wrap"><canvas id="chart-by-file"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Findings Heatmap (Category × Criticality)</h3>
+      <div id="heatmap-wrap" style="overflow-x:auto;padding-top:8px"></div>
+    </div>
+  </div>
+
+  <div class="filters">
+    <select id="filter-criticality" onchange="loadFindings()">
+      <option value="">All Criticalities</option>
+      <option value="critical">Critical</option>
+      <option value="high">High</option>
+      <option value="medium">Medium</option>
+      <option value="low">Low</option>
+      <option value="info">Info</option>
+    </select>
+    <select id="filter-category" onchange="loadFindings()">
+      <option value="">All Categories</option>
+      <option value="security">Security</option>
+      <option value="bug">Bug</option>
+      <option value="performance">Performance</option>
+      <option value="maintainability">Maintainability</option>
+      <option value="style">Style</option>
+      <option value="documentation">Documentation</option>
+    </select>
+    <button class="secondary" onclick="loadFindings()">↻ Refresh</button>
+    <button class="secondary" onclick="exportData()">⬇ Export JSON</button>
+    <button class="secondary" onclick="exportReport('html')">📄 Export HTML</button>
+    <button class="secondary" onclick="exportReport('xlsx')">📊 Export XLSX</button>
+  </div>
+
+  <div id="findings-table-wrap">
+    <div class="empty">Loading findings...</div>
+  </div>
+</div>
+
+<!-- OBSERVABILITY TAB -->
+<div id="tab-observability" class="page">
+  <div class="grid grid-4" style="margin-bottom:24px">
+    <div class="card"><h3>Total Tokens</h3><div class="value" id="obs-total-tokens">—</div></div>
+    <div class="card"><h3>Prompt Tokens</h3><div class="value" id="obs-prompt-tokens">—</div></div>
+    <div class="card"><h3>Completion Tokens</h3><div class="value" id="obs-completion-tokens">—</div></div>
+    <div class="card"><h3>LLM Calls</h3><div class="value" id="obs-llm-calls">—</div></div>
+  </div>
+  <div class="grid grid-4" style="margin-bottom:24px">
+    <div class="card"><h3>Review Sessions</h3><div class="value" id="obs-sessions">—</div></div>
+    <div class="card"><h3>Avg Tokens / Session</h3><div class="value" id="obs-avg-tokens">—</div></div>
+    <div class="card"><h3>Avg Findings / Session</h3><div class="value" id="obs-avg-findings">—</div></div>
+    <div class="card"><h3>Token Efficiency</h3><div class="value" id="obs-efficiency">—</div><div class="sub">findings per 1k tokens</div></div>
+  </div>
+  <div class="grid grid-2" style="margin-bottom:24px">
+    <div class="card"><h3>Most Expensive Session</h3><div class="value" id="obs-max-session">—</div><div class="sub" id="obs-max-session-id" style="font-family:monospace;font-size:11px"></div></div>
+    <div class="card"><h3>Total Findings</h3><div class="value" id="obs-total-findings">—</div></div>
+  </div>
+  <div class="grid grid-2" style="margin-bottom:24px">
+    <div class="chart-card">
+      <h3>Prompt vs Completion Tokens Over Time</h3>
+      <div class="chart-wrap"><canvas id="chart-tokens-split"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Model Distribution</h3>
+      <div class="chart-wrap"><canvas id="chart-models"></canvas></div>
+    </div>
+  </div>
+  <div class="grid grid-2" style="margin-bottom:24px">
+    <div class="chart-card">
+      <h3>Tool Call Success vs Failure Rate</h3>
+      <div class="chart-wrap"><canvas id="chart-tool-success"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Tool Invocations</h3>
+      <div class="chart-wrap"><canvas id="chart-tools"></canvas></div>
+    </div>
+  </div>
+  <div class="grid grid-2" style="margin-bottom:24px">
+    <div class="chart-card">
+      <h3>Tokens per Finding (Efficiency over Time)</h3>
+      <div class="chart-wrap"><canvas id="chart-efficiency"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Subagent Token Breakdown</h3>
+      <div id="subagent-breakdown-wrap" style="padding-top:8px;font-size:13px;color:#94a3b8">No subagent data yet.</div>
+    </div>
+  </div>
+</div>
+
+<!-- SESSIONS TAB -->
+<div id="tab-sessions" class="page">
+  <div id="sessions-list">
+    <div class="empty">Loading sessions...</div>
+  </div>
+  <div id="session-detail" style="display:none"></div>
+</div>
+
+<!-- SETTINGS TAB -->
+<div id="tab-settings" class="page">
+  <div style="max-width:700px">
+    <div class="form-row">
+      <label>LLM Provider</label>
+      <input id="cfg-provider" readonly style="opacity:.5"/>
+    </div>
+    <div class="form-row">
+      <label>Model</label>
+      <input id="cfg-model" readonly style="opacity:.5"/>
+    </div>
+    <div class="form-row">
+      <label>Iteration Limit</label>
+      <input id="cfg-limit" type="number" min="1" max="500"/>
+    </div>
+    <div class="form-row">
+      <label>System Prompt</label>
+      <textarea id="cfg-prompt" rows="12"></textarea>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button onclick="saveConfig()">Save</button>
+      <button class="secondary" onclick="resetPrompt()">Reset Prompt</button>
+    </div>
+    <div id="cfg-status" style="margin-top:12px;font-size:13px;color:#6ee7b7"></div>
+  </div>
+</div>
+
+
+<script>
+let categoryChart, criticalityChart, trendChart, byFileChart, tokensSplitChart, modelsChart, toolSuccessChart, toolsChart;
+
+function showTab(name) {
+  const tabs = ['findings','observability','sessions','settings'];
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', tabs[i] === name));
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'findings') { loadSummary(); loadFindings(); loadTrend(); loadByFile(); loadHeatmap(); }
+  if (name === 'observability') loadObservability();
+  if (name === 'sessions') loadSessions();
+  if (name === 'settings') loadConfig();
+}
+
+function critBadge(c) {
+  const cls = {critical:'badge-crit',high:'badge-high',medium:'badge-med',low:'badge-low',info:'badge-info'}[c] || 'badge-info';
+  return `<span class="${cls}">${c}</span>`;
+}
+function catBadge(c) { return `<span class="badge-cat">${c}</span>`; }
+function statusBadge(s) {
+  const cls = {open:'badge-open',fixed:'badge-fixed',dismissed:'badge-dismissed'}[s] || 'badge-open';
+  return `<span class="${cls}">${s||'open'}</span>`;
+}
+function fmt(n) { return (n||0).toLocaleString(); }
+
+async function loadSummary() {
+  const r = await fetch('/dashboard/api/findings/summary').then(r=>r.json()).catch(()=>({}));
+  const bc = r.by_criticality || {};
+  document.getElementById('cnt-critical').textContent = bc.critical || 0;
+  document.getElementById('cnt-high').textContent = bc.high || 0;
+  document.getElementById('cnt-medium').textContent = bc.medium || 0;
+  document.getElementById('cnt-low').textContent = (bc.low||0) + (bc.info||0);
+
+  const cats = r.by_category || [];
+  if (categoryChart) categoryChart.destroy();
+  categoryChart = new Chart(document.getElementById('chart-category'), {
+    type: 'bar',
+    data: { labels: cats.map(c=>c.category), datasets: [{ data: cats.map(c=>c.count), backgroundColor: '#6366f1', borderRadius: 4 }] },
+    options: { plugins:{legend:{display:false}}, scales:{x:{ticks:{color:'#94a3b8'}},y:{ticks:{color:'#94a3b8'},grid:{color:'#1e2433'}}}, responsive:true, maintainAspectRatio:false }
+  });
+
+  const crits = ['critical','high','medium','low','info'];
+  const colors = ['#ef4444','#f97316','#eab308','#3b82f6','#64748b'];
+  if (criticalityChart) criticalityChart.destroy();
+  criticalityChart = new Chart(document.getElementById('chart-criticality'), {
+    type: 'doughnut',
+    data: { labels: crits, datasets: [{ data: crits.map(c=>bc[c]||0), backgroundColor: colors, borderWidth: 0 }] },
+    options: { plugins:{legend:{labels:{color:'#94a3b8',font:{size:11}}}}, responsive:true, maintainAspectRatio:false }
+  });
+}
+
+async function loadTrend() {
+  const rows = await fetch('/dashboard/api/findings/trend').then(r=>r.json()).catch(()=>[]);
+  if (trendChart) trendChart.destroy();
+  trendChart = new Chart(document.getElementById('chart-trend'), {
+    type: 'line',
+    data: { labels: rows.map(r=>r.date), datasets: [{ label:'Findings', data: rows.map(r=>r.count), borderColor:'#6ee7b7', backgroundColor:'rgba(110,231,183,.1)', fill:true, tension:.3 }] },
+    options: { plugins:{legend:{display:false}}, scales:{x:{ticks:{color:'#94a3b8'}},y:{ticks:{color:'#94a3b8'},grid:{color:'#1e2433'}}}, responsive:true, maintainAspectRatio:false }
+  });
+}
+
+async function loadByFile() {
+  const rows = await fetch('/dashboard/api/findings/by-file').then(r=>r.json()).catch(()=>[]);
+  if (byFileChart) byFileChart.destroy();
+  byFileChart = new Chart(document.getElementById('chart-by-file'), {
+    type: 'bar',
+    data: {
+      labels: rows.map(r=>r.file_path.split('/').pop()),
+      datasets: [
+        { label:'Critical', data: rows.map(r=>r.critical||0), backgroundColor:'#ef4444', borderRadius:2 },
+        { label:'High',     data: rows.map(r=>r.high||0),     backgroundColor:'#f97316', borderRadius:2 },
+        { label:'Medium',   data: rows.map(r=>r.medium||0),   backgroundColor:'#eab308', borderRadius:2 },
+        { label:'Low',      data: rows.map(r=>r.low||0),      backgroundColor:'#3b82f6', borderRadius:2 },
+      ]
+    },
+    options: { indexAxis:'y', plugins:{legend:{labels:{color:'#94a3b8',font:{size:10}}}}, scales:{x:{stacked:true,ticks:{color:'#94a3b8'},grid:{color:'#1e2433'}},y:{stacked:true,ticks:{color:'#94a3b8',font:{size:10}}}}, responsive:true, maintainAspectRatio:false }
+  });
+}
+
+async function loadHeatmap() {
+  const data = await fetch('/dashboard/api/findings/heatmap').then(r=>r.json()).catch(()=>({}));
+  const crits = ['critical','high','medium','low','info'];
+  const cats = ['security','bug','perf','maint','style','doc'];
+  const critColors = {'critical':'#7f1d1d','high':'#7c2d12','medium':'#713f12','low':'#1e3a5f','info':'#1e293b'};
+  const allVals = Object.values(data).flatMap(v=>Object.values(v));
+  const maxVal = Math.max(...allVals, 1);
+
+  let html = `<table style="border-collapse:collapse;font-size:11px">
+    <thead><tr><th style="padding:4px 8px;color:#64748b"></th>${crits.map(c=>`<th style="padding:4px 8px;color:#94a3b8;text-align:center">${c}</th>`).join('')}</tr></thead><tbody>`;
+  for (const cat of cats) {
+    html += `<tr><td style="padding:4px 8px;color:#94a3b8;white-space:nowrap">${cat}</td>`;
+    for (const crit of crits) {
+      const v = (data[cat]||{})[crit] || 0;
+      const opacity = v ? 0.3 + (v/maxVal)*0.7 : 0.05;
+      const bg = critColors[crit] || '#1e293b';
+      html += `<td style="padding:4px 8px;text-align:center"><div class="heatmap-cell" style="background:${bg};opacity:${opacity.toFixed(2)};color:#fff">${v||''}</div></td>`;
+    }
+    html += '</tr>';
+  }
+  html += '</tbody></table>';
+  document.getElementById('heatmap-wrap').innerHTML = html;
+}
+
+async function loadFindings() {
+  const crit = document.getElementById('filter-criticality').value;
+  const cat = document.getElementById('filter-category').value;
+  let url = '/dashboard/api/findings?';
+  if (crit) url += `criticality=${crit}&`;
+  if (cat) url += `category=${cat}&`;
+  const findings = await fetch(url).then(r=>r.json()).catch(()=>[]);
+  const wrap = document.getElementById('findings-table-wrap');
+  if (!findings.length) { wrap.innerHTML = '<div class="empty">No findings yet. Run a review to see results.</div>'; return; }
+  wrap.innerHTML = `<table>
+    <thead><tr><th>#</th><th>Criticality</th><th>Category</th><th>File</th><th>Title</th><th>Description & Suggestion</th><th>Status</th></tr></thead>
+    <tbody>${findings.map(f=>`<tr>
+      <td style="color:#64748b;font-size:11px">${f.finding_id||f.id}</td>
+      <td>${critBadge(f.criticality)}</td>
+      <td>${catBadge(f.category)}</td>
+      <td><span class="finding-file">${f.file_path}${f.line_number?':'+f.line_number:''}</span></td>
+      <td style="font-weight:500;font-size:13px">${f.title}</td>
+      <td>
+        <div class="finding-desc">${f.description}</div>
+        <div class="finding-sug">💡 ${f.suggestion}</div>
+      </td>
+      <td>
+        ${statusBadge(f.status)}
+        <div style="margin-top:4px;display:flex;gap:4px">
+          <button class="secondary" style="padding:2px 6px;font-size:10px" onclick="setStatus(${f.id},'fixed',this)">✓ Fix</button>
+          <button class="secondary" style="padding:2px 6px;font-size:10px" onclick="setStatus(${f.id},'dismissed',this)">✕</button>
+        </div>
+      </td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+}
+
+async function setStatus(id, status, btn) {
+  await fetch(`/dashboard/api/findings/${id}/status`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status}) });
+  loadFindings();
+}
+
+async function loadObservability() {
+  const [summary, tokens, tools, models, sessions, findings, efficiency] = await Promise.all([
+    fetch('/dashboard/api/telemetry/summary').then(r=>r.json()).catch(()=>({})),
+    fetch('/dashboard/api/telemetry/tokens-over-time').then(r=>r.json()).catch(()=>[]),
+    fetch('/dashboard/api/telemetry/tools').then(r=>r.json()).catch(()=>[]),
+    fetch('/dashboard/api/telemetry/models').then(r=>r.json()).catch(()=>[]),
+    fetch('/dashboard/api/sessions').then(r=>r.json()).catch(()=>[]),
+    fetch('/dashboard/api/findings/summary').then(r=>r.json()).catch(()=>({})),
+    fetch('/dashboard/api/telemetry/efficiency').then(r=>r.json()).catch(()=>[]),
+  ]);
+
+  document.getElementById('obs-total-tokens').textContent = fmt(summary.total_tokens);
+  document.getElementById('obs-prompt-tokens').textContent = fmt(summary.prompt_tokens);
+  document.getElementById('obs-completion-tokens').textContent = fmt(summary.completion_tokens);
+  document.getElementById('obs-llm-calls').textContent = fmt(summary.llm_call_count);
+
+  const sessionCount = sessions.length;
+  document.getElementById('obs-sessions').textContent = sessionCount;
+  document.getElementById('obs-avg-tokens').textContent = sessionCount ? fmt(Math.round((summary.total_tokens||0)/sessionCount)) : '—';
+  const totalFindings = findings.total || 0;
+  document.getElementById('obs-total-findings').textContent = fmt(totalFindings);
+  document.getElementById('obs-avg-findings').textContent = sessionCount ? (totalFindings/sessionCount).toFixed(1) : '—';
+  const eff = summary.total_tokens ? ((totalFindings / summary.total_tokens) * 1000).toFixed(2) : '—';
+  document.getElementById('obs-efficiency').textContent = eff;
+
+  // Most expensive session
+  if (efficiency.length) {
+    const maxSess = efficiency.reduce((a,b) => b.tokens > a.tokens ? b : a, efficiency[0]);
+    document.getElementById('obs-max-session').textContent = fmt(maxSess.tokens) + ' tokens';
+    document.getElementById('obs-max-session-id').textContent = maxSess.thread_id.slice(0,8) + '…';
+  }
+
+  if (tokensSplitChart) tokensSplitChart.destroy();
+  tokensSplitChart = new Chart(document.getElementById('chart-tokens-split'), {
+    type: 'bar',
+    data: {
+      labels: tokens.map(t=>t.date),
+      datasets: [
+        { label:'Prompt', data: tokens.map(t=>t.prompt_tokens), backgroundColor:'#6366f1', stack:'s' },
+        { label:'Completion', data: tokens.map(t=>t.completion_tokens), backgroundColor:'#22d3ee', stack:'s' },
+      ]
+    },
+    options: { plugins:{legend:{labels:{color:'#94a3b8'}}}, scales:{x:{stacked:true,ticks:{color:'#94a3b8'}},y:{stacked:true,ticks:{color:'#94a3b8'},grid:{color:'#1e2433'}}}, responsive:true, maintainAspectRatio:false }
+  });
+
+  if (modelsChart) modelsChart.destroy();
+  modelsChart = new Chart(document.getElementById('chart-models'), {
+    type: 'doughnut',
+    data: { labels: models.map(m=>m.model), datasets: [{ data: models.map(m=>m.calls), backgroundColor:['#6366f1','#22d3ee','#f97316','#6ee7b7','#a78bfa'], borderWidth:0 }] },
+    options: { plugins:{legend:{labels:{color:'#94a3b8',font:{size:11}}}}, responsive:true, maintainAspectRatio:false }
+  });
+
+  if (toolSuccessChart) toolSuccessChart.destroy();
+  const topTools = tools.slice(0,8);
+  toolSuccessChart = new Chart(document.getElementById('chart-tool-success'), {
+    type: 'bar',
+    data: {
+      labels: topTools.map(t=>t.tool_name),
+      datasets: [
+        { label:'Success %', data: topTools.map(t=>100-(t.failure_rate||0)), backgroundColor:'#6ee7b7', borderRadius:2 },
+        { label:'Failure %', data: topTools.map(t=>t.failure_rate||0), backgroundColor:'#ef4444', borderRadius:2 },
+      ]
+    },
+    options: { plugins:{legend:{labels:{color:'#94a3b8'}}}, scales:{x:{stacked:true,ticks:{color:'#94a3b8',maxRotation:30}},y:{stacked:true,max:100,ticks:{color:'#94a3b8'},grid:{color:'#1e2433'}}}, responsive:true, maintainAspectRatio:false }
+  });
+
+  if (toolsChart) toolsChart.destroy();
+  toolsChart = new Chart(document.getElementById('chart-tools'), {
+    type: 'bar',
+    data: { labels: tools.map(t=>t.tool_name), datasets: [{ label:'Calls', data: tools.map(t=>t.invocation_count), backgroundColor:'#22d3ee', borderRadius:4 }] },
+    options: { plugins:{legend:{display:false}}, scales:{x:{ticks:{color:'#94a3b8',maxRotation:30}},y:{ticks:{color:'#94a3b8'},grid:{color:'#1e2433'}}}, responsive:true, maintainAspectRatio:false }
+  });
+
+  // Tokens per finding efficiency line
+  let effChart = Chart.getChart('chart-efficiency');
+  if (effChart) effChart.destroy();
+  new Chart(document.getElementById('chart-efficiency'), {
+    type: 'line',
+    data: {
+      labels: efficiency.map(e=>e.date),
+      datasets: [{ label:'Tokens/Finding', data: efficiency.map(e=>e.tokens_per_finding), borderColor:'#f97316', backgroundColor:'rgba(249,115,22,.1)', fill:true, tension:.3 }]
+    },
+    options: { plugins:{legend:{display:false}}, scales:{x:{ticks:{color:'#94a3b8'}},y:{ticks:{color:'#94a3b8'},grid:{color:'#1e2433'}}}, responsive:true, maintainAspectRatio:false }
+  });
+}
+
+async function loadSessions() {
+  const sessions = await fetch('/dashboard/api/sessions').then(r=>r.json()).catch(()=>[]);
+  const wrap = document.getElementById('sessions-list');
+  if (!sessions.length) { wrap.innerHTML = '<div class="empty">No review sessions yet.</div>'; return; }
+  wrap.innerHTML = `<table>
+    <thead><tr><th>Thread ID</th><th>Workspace</th><th>Date</th><th>Scope</th><th>Findings</th><th>Commit</th><th>Model</th></tr></thead>
+    <tbody>${sessions.map(s=>`<tr class="clickable" onclick="loadSessionDetail('${s.thread_id}')">
+      <td style="font-family:monospace;font-size:11px;color:#a5b4fc">${s.thread_id.slice(0,8)}…</td>
+      <td style="font-size:12px">${s.workspace||'—'}</td>
+      <td style="font-size:12px;color:#64748b">${(s.timestamp||'').slice(0,16)}</td>
+      <td><span class="badge-cat">${s.scope||'full'}</span></td>
+      <td style="font-weight:600">${s.total_findings||0}</td>
+      <td style="font-family:monospace;font-size:11px;color:#64748b">${s.commit_hash||'—'}</td>
+      <td style="font-size:11px;color:#64748b">${s.model||'—'}</td>
+    </tr>`).join('')}</tbody>
+  </table>`;
+  document.getElementById('session-detail').style.display = 'none';
+}
+
+async function loadSessionDetail(threadId) {
+  const d = await fetch(`/dashboard/api/telemetry/sessions/${threadId}`).then(r=>r.json()).catch(()=>({}));
+  const el = document.getElementById('session-detail');
+  el.style.display = 'block';
+
+  const totalTokens = d.total_tokens || 0;
+  const costEst = ((totalTokens / 1000) * 0.01).toFixed(4);
+
+  const llmRows = (d.llm_calls||[]).map(r=>`<tr>
+    <td style="font-size:11px;color:#64748b">${(r.timestamp||'').slice(0,19)}</td>
+    <td style="font-size:11px">${r.model||'—'}</td>
+    <td>${fmt(r.prompt_tokens)}</td><td>${fmt(r.completion_tokens)}</td><td>${fmt(r.total_tokens)}</td>
+  </tr>`).join('');
+
+  const toolRows = (d.tool_invocations||[]).map(r=>`<tr>
+    <td style="font-size:11px">${r.tool_name}</td>
+    <td style="font-size:11px;color:#64748b">${(r.timestamp||'').slice(0,19)}</td>
+    <td>${r.duration_ms ? r.duration_ms.toFixed(0)+'ms' : '—'}</td>
+    <td>${r.status==='success'?'<span style="color:#6ee7b7">✓</span>':'<span style="color:#ef4444">✗</span>'}</td>
+  </tr>`).join('');
+
+  const findingRows = (d.findings||[]).map(f=>`<tr>
+    <td>${critBadge(f.criticality)}</td>
+    <td style="font-family:monospace;font-size:11px;color:#a5b4fc">${f.file_path}${f.line_number?':'+f.line_number:''}</td>
+    <td style="font-size:12px">${f.title}</td>
+  </tr>`).join('');
+
+  el.innerHTML = `<div class="panel">
+    <h3>Session Detail — <span style="font-family:monospace;color:#a5b4fc">${threadId.slice(0,8)}…</span>
+      <button class="secondary" style="float:right;padding:4px 10px;font-size:11px" onclick="document.getElementById('session-detail').style.display='none'">✕ Close</button>
+    </h3>
+    <div class="grid grid-3" style="margin-bottom:16px">
+      <div class="card"><h3>Total Tokens</h3><div class="value">${fmt(totalTokens)}</div></div>
+      <div class="card"><h3>Findings</h3><div class="value">${d.finding_count||0}</div></div>
+      <div class="card"><h3>Est. Cost</h3><div class="value">$${costEst}</div><div class="sub">@ $0.01/1k tokens</div></div>
+    </div>
+    <div class="grid grid-2">
+      <div>
+        <div class="section-title" style="margin-top:0">LLM Calls</div>
+        <table><thead><tr><th>Time</th><th>Model</th><th>Prompt</th><th>Completion</th><th>Total</th></tr></thead>
+        <tbody>${llmRows||'<tr><td colspan="5" style="color:#475569;text-align:center;padding:16px">No LLM calls</td></tr>'}</tbody></table>
+      </div>
+      <div>
+        <div class="section-title" style="margin-top:0">Tool Invocations</div>
+        <table><thead><tr><th>Tool</th><th>Time</th><th>Duration</th><th>Status</th></tr></thead>
+        <tbody>${toolRows||'<tr><td colspan="4" style="color:#475569;text-align:center;padding:16px">No tool calls</td></tr>'}</tbody></table>
+      </div>
+    </div>
+    <div class="section-title">Findings</div>
+    <table><thead><tr><th>Criticality</th><th>File</th><th>Title</th></tr></thead>
+    <tbody>${findingRows||'<tr><td colspan="3" style="color:#475569;text-align:center;padding:16px">No findings</td></tr>'}</tbody></table>
+    <div style="margin-top:12px;display:flex;gap:8px">
+      <button class="secondary" onclick="exportReport('html','${threadId}')">📄 Export HTML</button>
+      <button class="secondary" onclick="exportReport('xlsx','${threadId}')">📊 Export XLSX</button>
+    </div>
+  </div>`;
+}
+
+async function loadConfig() {
+  const cfg = await fetch('/dashboard/api/config').then(r=>r.json()).catch(()=>({}));
+  document.getElementById('cfg-provider').value = cfg.llm_provider || '';
+  document.getElementById('cfg-model').value = cfg.model_name || '';
+  document.getElementById('cfg-limit').value = cfg.iteration_limit || 80;
+  document.getElementById('cfg-prompt').value = cfg.system_prompt || '';
+}
+
+async function saveConfig() {
+  const body = {
+    system_prompt: document.getElementById('cfg-prompt').value,
+    iteration_limit: parseInt(document.getElementById('cfg-limit').value),
+    enabled_tools: ['record_finding'],
+    llm_provider: document.getElementById('cfg-provider').value,
+    model_name: document.getElementById('cfg-model').value,
+  };
+  const r = await fetch('/dashboard/api/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+  document.getElementById('cfg-status').textContent = r.ok ? '✅ Saved' : '❌ Error saving';
+  setTimeout(()=>document.getElementById('cfg-status').textContent='', 3000);
+}
+
+async function resetPrompt() {
+  await fetch('/dashboard/api/config/reset-prompt', { method:'POST' });
+  loadConfig();
+}
+
+async function exportData() { window.open('/dashboard/api/export', '_blank'); }
+
+function exportReport(type, threadId) {
+  const tid = threadId || '';
+  window.open(`/dashboard/api/reports/${type}${tid ? '?thread_id='+tid : ''}`, '_blank');
+}
+
+// Init
+loadSummary();
+loadFindings();
+loadTrend();
+loadByFile();
+loadHeatmap();
+</script>
+</body>
+</html>
