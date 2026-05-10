@@ -319,7 +319,7 @@ async def main(message: cl.Message):
     if cl.user_session.get("review_start_time") is None:
         cl.user_session.set("review_start_time", time.monotonic())
 
-    stream_msg = cl.Message(content="")
+    stream_msg = cl.Message(content="🤔 Thinking...")
     await stream_msg.send()
 
     full_content = ""
@@ -332,47 +332,11 @@ async def main(message: cl.Message):
     finding_count: int = cl.user_session.get("finding_count") or 0
     findings_this_turn: int = 0  # only findings recorded in this message turn
     tools_fired: bool = False
-    is_review: bool = False  # only show progress element during a review pass
+    was_cancelled: bool = False  # set True if user clicks Stop
 
     # Clear per-turn agent banner flags so each new message can show banners again
     for agent_key in AGENT_DISPLAY:
         cl.user_session.set(f"banner_shown_{agent_key}", False)
-
-    # Progress element — only shown during review, lazily created
-    progress_el = None
-
-    async def _update_progress(current_tool: str = ""):
-        nonlocal progress_el, is_review
-        if not is_review:
-            return
-        counts = {}
-        for fnd in session_findings:
-            counts[fnd["criticality"]] = counts.get(fnd["criticality"], 0) + 1
-        parts = []
-        for crit in ["critical", "high", "medium", "low", "info"]:
-            if counts.get(crit):
-                parts.append(f"{CRIT_EMOJI[crit]} {counts[crit]}")
-        findings_str = "  ".join(parts) if parts else "0 findings"
-        tool_str = f"  |  {current_tool}" if current_tool else ""
-        content = f"🔍 Reviewing...  {findings_str}{tool_str}"
-        try:
-            if progress_el is None:
-                progress_el = cl.Text(name="review-progress", content=content, display="inline")
-            else:
-                progress_el.content = content
-            await progress_el.send(for_id=stream_msg.id)
-        except Exception:
-            pass
-
-    async def _clear_progress():
-        nonlocal progress_el
-        if progress_el is not None:
-            try:
-                progress_el.content = ""
-                await progress_el.remove()
-            except Exception:
-                pass
-            progress_el = None
 
     try:
         input_data = {"messages": [("user", message.content or "")]}
@@ -409,6 +373,9 @@ async def main(message: cl.Message):
                         # Only stream to user when no tools have fired yet (pure conversational reply)
                         # Once tools start, the agent is in "working" mode — suppress intermediate tokens
                         if not tools_fired:
+                            if stream_msg.content == "🤔 Thinking...":
+                                stream_msg.content = ""
+                                await stream_msg.update()
                             await stream_msg.stream_token(chunk)
 
                 elif kind == "on_tool_start":
@@ -421,10 +388,6 @@ async def main(message: cl.Message):
                         full_content = ""
                         stream_msg.content = ""
                         await stream_msg.update()
-
-                    # Detect review mode — any of these tools means we're reviewing
-                    if tool_name in ("f", "record_finding", "write_todos", "task"):
-                        is_review = True
 
                     # Agent transition banner — once per agent per message turn, with context
                     if agent_name and agent_name in AGENT_DISPLAY:
@@ -460,8 +423,26 @@ async def main(message: cl.Message):
                         pass
 
                     # Snapshot file content before edit_file/write_file so we can diff + undo
-                    if tool_name in ("edit_file", "write_file") and isinstance(tool_input, dict):
-                        fp = tool_input.get("file_path") or tool_input.get("path", "")
+                    if tool_name in ("edit_file", "write_file"):
+                        inp_dict = tool_input if isinstance(tool_input, dict) else {}
+                        fp = (
+                            inp_dict.get("file_path")
+                            or inp_dict.get("path")
+                            or inp_dict.get("target_file")
+                            or inp_dict.get("filename", "")
+                        )
+                        logger.info(
+                            "[DIFF-DEBUG] on_tool_start %s  run_id=%s  "
+                            "input_type=%s  keys=%s  fp=%r",
+                            tool_name, run_id,
+                            type(tool_input).__name__,
+                            list(inp_dict.keys()) if inp_dict else "N/A",
+                            fp,
+                        )
+                        # Persist tool input on session so it survives across
+                        # interrupt boundaries where run_id may change.
+                        if inp_dict:
+                            cl.user_session.set("_last_edit_input", inp_dict)
                         if fp:
                             workspace_path = cl.user_session.get("workspace", "")
                             # fp from deepagents is always absolute — don't double-join
@@ -487,7 +468,7 @@ async def main(message: cl.Message):
                                     undo_store[fp] = {"type": "new_file"}
                             cl.user_session.set("undo_store", undo_store)
 
-                    await _update_progress(label)
+
 
                 elif kind == "on_tool_end":
                     step = active_steps.pop(run_id, None)
@@ -514,9 +495,47 @@ async def main(message: cl.Message):
 
                     # Diff viewer + Undo button after edit_file / write_file
                     if tool_name in ("edit_file", "write_file"):
-                        fp = tool_input_data.get("file_path") or tool_input_data.get("path", "")
+                        # Fallback: if tool_input_data is empty (run_id changed
+                        # across an interrupt boundary), recover from session.
+                        if not tool_input_data:
+                            tool_input_data = cl.user_session.get("_last_edit_input") or {}
+                            logger.info(
+                                "[DIFF-DEBUG] on_tool_end %s  run_id=%s  "
+                                "tool_input_data was EMPTY — recovered from session: keys=%s",
+                                tool_name, run_id, list(tool_input_data.keys()),
+                            )
+
+                        fp = (
+                            tool_input_data.get("file_path")
+                            or tool_input_data.get("path")
+                            or tool_input_data.get("target_file")
+                            or tool_input_data.get("filename", "")
+                        )
+
+                        logger.info(
+                            "[DIFF-DEBUG] on_tool_end %s  run_id=%s  fp=%r  "
+                            "undo_store_keys=%s  out_preview=%r",
+                            tool_name, run_id, fp,
+                            list((cl.user_session.get('undo_store') or {}).keys()),
+                            out_str[:120],
+                        )
+
                         undo_store = cl.user_session.get("undo_store") or {}
                         snap = undo_store.get(fp)
+
+                        # If snap lookup failed by exact key, try matching by
+                        # basename — the snapshot key might differ in path form.
+                        if snap is None and fp:
+                            fp_base = os.path.basename(fp)
+                            for stored_fp, stored_snap in undo_store.items():
+                                if os.path.basename(stored_fp) == fp_base:
+                                    snap = stored_snap
+                                    logger.info(
+                                        "[DIFF-DEBUG] snap recovered via basename match: "
+                                        "stored_key=%r  fp=%r", stored_fp, fp,
+                                    )
+                                    break
+
                         if fp and snap is not None:
                             workspace_path = cl.user_session.get("workspace", "")
                             full_fp = fp if os.path.isabs(fp) else os.path.join(workspace_path, fp)
@@ -565,7 +584,15 @@ async def main(message: cl.Message):
                                     else:
                                         await cl.Message(content=f"✏️ **Edited `{display_fp}`** (no diff detected)").send()
                             except Exception as e:
+                                logger.warning("[DIFF-DEBUG] diff display failed: %s", e, exc_info=True)
                                 await cl.Message(content=f"✏️ **Edited `{display_fp}`**").send()
+                        else:
+                            logger.warning(
+                                "[DIFF-DEBUG] No diff shown — fp=%r  snap=%s  "
+                                "undo_store_keys=%s",
+                                fp, "found" if snap is not None else "MISSING",
+                                list(undo_store.keys()),
+                            )
 
                         # Mark only the targeted findings for this file as fixed
                         if fp and not out_str.startswith("Error") and _fixing_ids:
@@ -657,7 +684,7 @@ async def main(message: cl.Message):
                                 f"{est_str}"
                             )
                             await cl.Message(content=card, parent_id=stream_msg.id).send()
-                            await _update_progress()
+
 
                     # Todo list updates
                     if tool_name == "write_todos" and tool_output:
@@ -728,6 +755,48 @@ async def main(message: cl.Message):
                                 f"{r.get('name')}: {r.get('args', {}).get('command', r.get('args', ''))}"
                                 for r in reqs
                             ])
+
+                            # Capture pre-edit snapshot from interrupt args
+                            # (on_tool_start never fires before an interrupt)
+                            for req in reqs:
+                                req_name = req.get("name", "")
+                                req_args = req.get("args", {})
+                                if req_name in ("edit_file", "write_file") and isinstance(req_args, dict):
+                                    fp = (
+                                        req_args.get("file_path")
+                                        or req_args.get("path")
+                                        or req_args.get("target_file")
+                                        or req_args.get("filename", "")
+                                    )
+                                    logger.info(
+                                        "[DIFF-DEBUG] Interrupt snapshot for %s  fp=%r  keys=%s",
+                                        req_name, fp, list(req_args.keys()),
+                                    )
+                                    # Save tool input for on_tool_end fallback
+                                    cl.user_session.set("_last_edit_input", req_args)
+
+                                    if fp:
+                                        workspace_path = cl.user_session.get("workspace", "")
+                                        full_fp = fp if os.path.isabs(fp) else os.path.join(workspace_path, fp)
+                                        undo_store = cl.user_session.get("undo_store") or {}
+                                        if req_name == "edit_file":
+                                            try:
+                                                with open(full_fp, "r", encoding="utf-8", errors="replace") as fh:
+                                                    original = fh.read()
+                                                undo_store[fp] = {"type": "edit", "original": original}
+                                            except Exception:
+                                                pass
+                                        else:  # write_file
+                                            if os.path.exists(full_fp):
+                                                try:
+                                                    with open(full_fp, "r", encoding="utf-8", errors="replace") as fh:
+                                                        original = fh.read()
+                                                    undo_store[fp] = {"type": "edit", "original": original}
+                                                except Exception:
+                                                    pass
+                                            else:
+                                                undo_store[fp] = {"type": "new_file"}
+                                        cl.user_session.set("undo_store", undo_store)
                         else:
                             cmd_str = str(interrupt_info)
                     except Exception:
@@ -752,6 +821,12 @@ async def main(message: cl.Message):
                     continue
             break
 
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        was_cancelled = True
+        logger.info("Task manually stopped by user (findings so far: %d)", len(session_findings))
+        # Re-raise so Chainlit actually cancels the task and stops LLM calls
+        raise
+
     except Exception as e:
         error_text = f"🚨 {type(e).__name__}: {e}"
         logger.error(error_text, exc_info=True)
@@ -760,15 +835,54 @@ async def main(message: cl.Message):
         return
 
     finally:
-        if full_content:
-            stream_msg.content = full_content
-            await stream_msg.update()
-        elif not stream_msg.content:
-            stream_msg.content = "Done."
-            await stream_msg.update()
+        # UI cleanup — use shield so these complete even during cancellation
+        try:
+            if was_cancelled:
+                stream_msg.content = "⏹️ Task manually stopped."
+                await asyncio.shield(stream_msg.update())
+            elif full_content:
+                stream_msg.content = full_content
+                await asyncio.shield(stream_msg.update())
+            elif not stream_msg.content:
+                stream_msg.content = "Done."
+                await asyncio.shield(stream_msg.update())
+        except Exception:
+            pass
 
-        # Clear progress indicator
-        await _clear_progress()
+        # Inject accumulated context into the agent's LangGraph state so
+        # it remembers what happened — especially important after a manual stop.
+        if session_findings:
+            try:
+                # Build a compact findings summary for the agent's memory
+                findings_lines = []
+                for fnd in session_findings:
+                    fid = fnd.get("id", "?")
+                    crit = fnd.get("criticality", "info")
+                    cat = fnd.get("category", "")
+                    title = fnd.get("title", "")
+                    fp = fnd.get("file_path", "")
+                    ln = fnd.get("line_number", 0)
+                    status = fnd.get("status", "open")
+                    findings_lines.append(
+                        f"  #{fid} [{crit}] {cat} — {title} — {fp}:{ln} ({status})"
+                    )
+                stop_note = "\n\n⚠️ Task stopped manually by the user. The above findings were already shown." if was_cancelled else ""
+                memory_summary = (
+                    f"[SYSTEM: Review state — {len(session_findings)} findings recorded so far]\n"
+                    + "\n".join(findings_lines)
+                    + stop_note
+                )
+                await asyncio.shield(agent.aupdate_state(
+                    config,
+                    {"messages": [("assistant", memory_summary)]},
+                ))
+                logger.info(
+                    "Injected %d findings into agent state (cancelled=%s)",
+                    len(session_findings), was_cancelled,
+                )
+            except Exception as e:
+                logger.warning("Failed to inject findings into agent state: %s", e)
+
 
         for step in all_steps:
             try:

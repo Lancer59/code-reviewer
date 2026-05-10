@@ -117,25 +117,30 @@ C=critical(security/data-loss) H=high(prod bug) M=medium(quality) L=low(style) I
 sec=security  bug=logic-error  perf=performance  maint=maintainability  style=style  doc=documentation
 
 ## Workflow
-1. write_todos — plan passes: security, bugs, performance, maintainability, style
+1. write_todos - plan passes: security, bugs, performance, maintainability, style
 2. Security pass: delegate to `security-scanner` subagent for the full codebase
-3. For each source file: delegate to `file-scanner` subagent — it returns findings, call `f` for each
+3. For each source file: delegate to `file-scanner` subagent - it returns findings, call `f` for each
 4. Use grep_search for cross-file patterns (TODO, FIXME, deprecated APIs)
 5. Final message: counts by criticality + top 3 issues + health score /10
 
 Rules: be specific (file+line), be actionable (concrete fix), cover ALL files.
-Delegate file reading to subagents — keep your own context for coordination only."""
+Delegate file reading to subagents — keep your own context for coordination only.
 
-GIT_AGENT_PROMPT = """You apply code fixes and commit them cleanly.
+## Fixing Issues
+When the user asks to fix an issue:
+1. Use `read_file` to read the target file.
+2. Use `edit_file` to apply the code fix.
+3. Once all requested fixes are applied, ask the user: "Do you want me to use git tools to verify the changes and create a branch/commit?"
+4. If the user agrees, delegate to the `git-agent` to handle git operations.
+"""
+GIT_AGENT_PROMPT = """You handle git operations for applied code fixes.
 
-Workflow for each fix:
-1. git_create_branch — create branch named fix/<short-slug>
-2. edit_file — apply the fix
-3. git_status — verify the change
-4. git_commit — commit with conventional-commits message (e.g. "fix(security): move API key to env var")
+Workflow:
+1. Try `git_status` to verify the codebase changes. If it fails (not a git repo), tell the user and stop.
+2. `git_create_branch` - create a new branch named fix/<short-slug>
+3. `git_commit` - commit with a conventional-commits message (e.g. "fix(security): move API key to env var")
 
-Return a one-line summary: "Committed <hash> on branch <name>: <message>"
-Keep changes minimal — fix only what was asked, nothing else."""
+Return a one-line summary: "Committed on branch <name>: <message>"""
 
 FILE_SCANNER_PROMPT = """You are a code quality scanner. Read the given file and return ALL issues found.
 
@@ -212,13 +217,12 @@ async def create_review_agent(
         + repo_map_section
     )
 
-    # Git subagent — handles all fix+commit work in isolated context
+    # Git subagent — strictly handles git operations after edits are applied
     git_subagent = {
         "name": "git-agent",
         "description": (
-            "Applies a code fix to a specific file, creates a git branch, and commits the change. "
-            "Use when the user asks to fix a finding. Provide the file path, the fix description, "
-            "and the original + new code."
+            "Handles git operations (branching and committing). Use this ONLY AFTER you have "
+            "already applied code fixes and the user has explicitly agreed to branch and commit them."
         ),
         "system_prompt": GIT_AGENT_PROMPT,
         "tools": [git_create_branch, git_commit, git_stash, git_status, git_diff],
