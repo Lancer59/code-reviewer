@@ -1,5 +1,5 @@
 """
-Dashboard DB for Code Reviewer.
+Dashboard DB for Dev Companion.
 Tracks LLM calls, tool invocations, and review findings with criticality.
 """
 
@@ -41,7 +41,8 @@ async def init_db() -> None:
                 finding_id INTEGER,
                 estimated_fix_tokens INTEGER,
                 status TEXT DEFAULT 'open',
-                agent_name TEXT
+                agent_name TEXT,
+                workspace TEXT
             );
             CREATE TABLE IF NOT EXISTS agent_config (
                 id INTEGER PRIMARY KEY,
@@ -66,6 +67,7 @@ async def init_db() -> None:
             ("estimated_fix_tokens", "INTEGER"),
             ("status", "TEXT DEFAULT 'open'"),
             ("agent_name", "TEXT"),
+            ("workspace", "TEXT"),
         ]:
             try:
                 await db.execute(f"ALTER TABLE review_findings ADD COLUMN {col} {defn}")
@@ -169,16 +171,18 @@ async def record_finding(thread_id: str, file_path: str, line_number: int,
                           criticality: str, category: str, title: str,
                           description: str, suggestion: str,
                           finding_id: int = None, estimated_fix_tokens: int = None,
-                          agent_name: str = None) -> int:
+                          agent_name: str = None, workspace: str = None) -> int:
     ts = datetime.datetime.utcnow().isoformat()
+    # Derive a clean project name from the workspace path (last path component)
+    project = os.path.basename(workspace.rstrip("/\\")) if workspace else None
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute(
             """INSERT INTO review_findings
                (thread_id,timestamp,file_path,line_number,criticality,category,
-                title,description,suggestion,finding_id,estimated_fix_tokens,status,agent_name)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,'open',?)""",
+                title,description,suggestion,finding_id,estimated_fix_tokens,status,agent_name,workspace)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,'open',?,?)""",
             (thread_id, ts, file_path, line_number, criticality, category,
-             title, description, suggestion, finding_id, estimated_fix_tokens, agent_name))
+             title, description, suggestion, finding_id, estimated_fix_tokens, agent_name, project))
         await db.commit()
         return cur.lastrowid
 

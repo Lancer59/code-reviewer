@@ -1,4 +1,4 @@
-# Code Reviewer — Functional Understanding
+# Dev Companion — Functional Understanding
 
 This document explains how the system behaves from a user's perspective and how each feature works end-to-end. It's the right document to read before making changes to the codebase.
 

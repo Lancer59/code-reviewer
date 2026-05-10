@@ -1,4 +1,4 @@
-"""Dashboard API for Code Reviewer — findings, observability, settings, reports."""
+"""Dashboard API for Dev Companion — findings, observability, settings, reports."""
 
 import io
 import json
@@ -15,7 +15,7 @@ from dashboard.db import DB_PATH, DEFAULT_SYSTEM_PROMPT, get_config, save_config
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
-dashboard_app = FastAPI(title="Code Reviewer Dashboard")
+dashboard_app = FastAPI(title="Dev Companion Dashboard")
 
 try:
     dashboard_app.mount("/dashboard/static", StaticFiles(directory=os.path.join(_HERE, "static"), html=True), name="static")
@@ -67,6 +67,19 @@ async def api_reset_prompt():
     return {"status": "ok"}
 
 
+# --- Workspaces ---
+
+@dashboard_app.get("/dashboard/api/workspaces")
+async def api_workspaces():
+    """Return distinct project names that have findings recorded."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT DISTINCT workspace FROM review_findings WHERE workspace IS NOT NULL AND workspace != '' ORDER BY workspace"
+        ) as cur:
+            rows = await cur.fetchall()
+    return [r[0] for r in rows]
+
+
 # --- Findings (code-reviewer specific) ---
 
 @dashboard_app.get("/dashboard/api/findings")
@@ -74,6 +87,7 @@ async def api_findings(
     thread_id: Optional[str] = None,
     criticality: Optional[str] = None,
     category: Optional[str] = None,
+    workspace: Optional[str] = None,
     start: Optional[str] = None,
     end: Optional[str] = None,
 ):
@@ -91,6 +105,9 @@ async def api_findings(
     if category:
         query += " AND category = ?"
         params.append(category)
+    if workspace:
+        query += " AND workspace = ?"
+        params.append(workspace)
     query += " ORDER BY CASE criticality WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END, timestamp DESC"
 
     async with aiosqlite.connect(DB_PATH) as db:
@@ -101,17 +118,21 @@ async def api_findings(
 
 
 @dashboard_app.get("/dashboard/api/findings/summary")
-async def api_findings_summary(start: Optional[str] = None, end: Optional[str] = None):
+async def api_findings_summary(workspace: Optional[str] = None, start: Optional[str] = None, end: Optional[str] = None):
+    ws_clause = " WHERE workspace = ?" if workspace else ""
+    ws_params = [workspace] if workspace else []
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT criticality, COUNT(*) as count FROM review_findings GROUP BY criticality") as cur:
+            f"SELECT criticality, COUNT(*) as count FROM review_findings{ws_clause} GROUP BY criticality",
+            ws_params) as cur:
             by_criticality = {r[0]: r[1] for r in await cur.fetchall()}
 
         async with db.execute(
-            "SELECT category, COUNT(*) as count FROM review_findings GROUP BY category ORDER BY count DESC") as cur:
+            f"SELECT category, COUNT(*) as count FROM review_findings{ws_clause} GROUP BY category ORDER BY count DESC",
+            ws_params) as cur:
             by_category = [{"category": r[0], "count": r[1]} for r in await cur.fetchall()]
 
-        async with db.execute("SELECT COUNT(*) FROM review_findings") as cur:
+        async with db.execute(f"SELECT COUNT(*) FROM review_findings{ws_clause}", ws_params) as cur:
             total = (await cur.fetchone())[0]
 
     return {
@@ -187,18 +208,23 @@ async def api_export():
 # --- New v2 endpoints ---
 
 @dashboard_app.get("/dashboard/api/findings/by-file")
-async def api_findings_by_file(thread_id: Optional[str] = None):
-    query = """SELECT file_path, COUNT(*) as total,
+async def api_findings_by_file(thread_id: Optional[str] = None, workspace: Optional[str] = None):
+    conditions = []
+    params = []
+    if thread_id:
+        conditions.append("thread_id = ?")
+        params.append(thread_id)
+    if workspace:
+        conditions.append("workspace = ?")
+        params.append(workspace)
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    query = f"""SELECT file_path, COUNT(*) as total,
                SUM(CASE WHEN criticality='critical' THEN 1 ELSE 0 END) as critical,
                SUM(CASE WHEN criticality='high' THEN 1 ELSE 0 END) as high,
                SUM(CASE WHEN criticality='medium' THEN 1 ELSE 0 END) as medium,
                SUM(CASE WHEN criticality='low' THEN 1 ELSE 0 END) as low
-               FROM review_findings"""
-    params = []
-    if thread_id:
-        query += " WHERE thread_id = ?"
-        params.append(thread_id)
-    query += " GROUP BY file_path ORDER BY total DESC LIMIT 10"
+               FROM review_findings{where}
+               GROUP BY file_path ORDER BY total DESC LIMIT 10"""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(query, params) as cur:
@@ -206,25 +232,31 @@ async def api_findings_by_file(thread_id: Optional[str] = None):
 
 
 @dashboard_app.get("/dashboard/api/findings/trend")
-async def api_findings_trend(start: Optional[str] = None, end: Optional[str] = None):
+async def api_findings_trend(workspace: Optional[str] = None, start: Optional[str] = None, end: Optional[str] = None):
     start, end = _dates(start, end)
+    ws_clause = " AND workspace = ?" if workspace else ""
+    ws_params = [workspace] if workspace else []
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            """SELECT substr(timestamp,1,10) as date, COUNT(*) as count
-               FROM review_findings WHERE substr(timestamp,1,10) BETWEEN ? AND ?
-               GROUP BY date ORDER BY date""", (start, end)) as cur:
+            f"""SELECT substr(timestamp,1,10) as date, COUNT(*) as count
+               FROM review_findings WHERE substr(timestamp,1,10) BETWEEN ? AND ?{ws_clause}
+               GROUP BY date ORDER BY date""", [start, end] + ws_params) as cur:
             rows = await cur.fetchall()
     return [{"date": r[0], "count": r[1]} for r in rows]
 
 
 @dashboard_app.get("/dashboard/api/findings/heatmap")
-async def api_findings_heatmap(thread_id: Optional[str] = None):
-    query = "SELECT category, criticality, COUNT(*) as count FROM review_findings"
+async def api_findings_heatmap(thread_id: Optional[str] = None, workspace: Optional[str] = None):
+    conditions = []
     params = []
     if thread_id:
-        query += " WHERE thread_id = ?"
+        conditions.append("thread_id = ?")
         params.append(thread_id)
-    query += " GROUP BY category, criticality"
+    if workspace:
+        conditions.append("workspace = ?")
+        params.append(workspace)
+    where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+    query = f"SELECT category, criticality, COUNT(*) as count FROM review_findings{where} GROUP BY category, criticality"
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(query, params) as cur:
             rows = await cur.fetchall()
@@ -329,16 +361,20 @@ def _health_score(findings: list) -> float:
 
 
 @dashboard_app.get("/dashboard/api/reports/html")
-async def api_report_html(thread_id: Optional[str] = None):
+async def api_report_html(thread_id: Optional[str] = None, workspace: Optional[str] = None):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        q = "SELECT * FROM review_findings"
-        p = []
+        conditions = []
+        params = []
         if thread_id:
-            q += " WHERE thread_id=?"
-            p.append(thread_id)
-        q += " ORDER BY CASE criticality WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END"
-        async with db.execute(q, p) as cur:
+            conditions.append("thread_id=?")
+            params.append(thread_id)
+        if workspace:
+            conditions.append("workspace=?")
+            params.append(workspace)
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        q = f"SELECT * FROM review_findings{where} ORDER BY CASE criticality WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END"
+        async with db.execute(q, params) as cur:
             findings = [dict(r) for r in await cur.fetchall()]
 
     if not findings:
@@ -444,7 +480,7 @@ function filterTable(){{
 
 
 @dashboard_app.get("/dashboard/api/reports/xlsx")
-async def api_report_xlsx(thread_id: Optional[str] = None):
+async def api_report_xlsx(thread_id: Optional[str] = None, workspace: Optional[str] = None):
     try:
         import openpyxl
         from openpyxl.styles import PatternFill, Font, Alignment
@@ -453,18 +489,27 @@ async def api_report_xlsx(thread_id: Optional[str] = None):
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        q = "SELECT * FROM review_findings"
-        p = []
+        conditions = []
+        params = []
         if thread_id:
-            q += " WHERE thread_id=?"
-            p.append(thread_id)
-        q += " ORDER BY CASE criticality WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END"
-        async with db.execute(q, p) as cur:
+            conditions.append("thread_id=?")
+            params.append(thread_id)
+        if workspace:
+            conditions.append("workspace=?")
+            params.append(workspace)
+        where = (" WHERE " + " AND ".join(conditions)) if conditions else ""
+        q = f"SELECT * FROM review_findings{where} ORDER BY CASE criticality WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END"
+        async with db.execute(q, params) as cur:
             findings = [dict(r) for r in await cur.fetchall()]
 
+        llm_conditions = ["1=1"]
+        llm_params = []
+        if thread_id:
+            llm_conditions.append("thread_id=?")
+            llm_params.append(thread_id)
         async with db.execute(
-            "SELECT * FROM llm_calls" + (" WHERE thread_id=?" if thread_id else "") + " ORDER BY timestamp",
-            ([thread_id] if thread_id else [])) as cur:
+            f"SELECT * FROM llm_calls WHERE {' AND '.join(llm_conditions)} ORDER BY timestamp",
+            llm_params) as cur:
             llm_calls = [dict(r) for r in await cur.fetchall()]
 
     if not findings:

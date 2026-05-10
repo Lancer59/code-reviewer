@@ -1,4 +1,4 @@
-# 🔍 Code Reviewer
+# 🔍 Dev Companion
 
 An AI-powered code review agent built on [deepagents](https://github.com/langchain-ai/deepagents) + Chainlit. Point it at any local repository and it produces structured findings with criticality levels, categories, and actionable fix suggestions.
 

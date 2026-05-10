@@ -29,7 +29,7 @@ favorites = false
     sample_rate = 24000
 
 [UI]
-name = "Code Reviewer"
+name = "Dev Companion"
 cot = "full"
 confirm_new_chat = true
 alert_style = "classic"

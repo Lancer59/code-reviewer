@@ -1,4 +1,4 @@
-"""Chainlit UI for the Code Reviewer — rich activity display, finding cards, approvals."""
+"""Chainlit UI for Dev Companion — rich activity display, finding cards, approvals."""
 
 import chainlit as cl
 import os
@@ -154,7 +154,7 @@ async def start():
             logger.warning(f"init_db failed: {e}")
 
     res = await cl.AskUserMessage(
-        content="🔍 **Code Reviewer**\n\nEnter the project folder name to review (sibling to code-reviewer):"
+        content="🔍 **Dev Companion**\n\nEnter the project folder name to review (sibling to code-reviewer):"
     ).send()
     if not res:
         return
@@ -252,7 +252,7 @@ async def start():
         msg.content = (
             f"✅ Ready to review **`{project_folder}`**{scope_hint}\n\n"
             "Type **`review`** to start a full review, or ask a specific question.\n"
-            "After the review, say **`fix #1`** or **`fix all critical`** to apply fixes."
+            "After the review, you can say **`fix #1`** or **`fix all critical`** to apply fixes."
         )
         await msg.update()
     except Exception as e:
@@ -459,20 +459,33 @@ async def main(message: cl.Message):
                     except Exception:
                         pass
 
-                    # Snapshot file content before edit_file so we can undo
-                    if tool_name == "edit_file" and isinstance(tool_input, dict):
+                    # Snapshot file content before edit_file/write_file so we can diff + undo
+                    if tool_name in ("edit_file", "write_file") and isinstance(tool_input, dict):
                         fp = tool_input.get("file_path") or tool_input.get("path", "")
                         if fp:
                             workspace_path = cl.user_session.get("workspace", "")
-                            full_fp = os.path.join(workspace_path, fp) if workspace_path else fp
-                            try:
-                                with open(full_fp, "r", encoding="utf-8", errors="replace") as fh:
-                                    original = fh.read()
-                                undo_store = cl.user_session.get("undo_store") or {}
-                                undo_store[fp] = original
-                                cl.user_session.set("undo_store", undo_store)
-                            except Exception:
-                                pass
+                            # fp from deepagents is always absolute — don't double-join
+                            full_fp = fp if os.path.isabs(fp) else os.path.join(workspace_path, fp)
+                            undo_store = cl.user_session.get("undo_store") or {}
+                            if tool_name == "edit_file":
+                                try:
+                                    with open(full_fp, "r", encoding="utf-8", errors="replace") as fh:
+                                        original = fh.read()
+                                    undo_store[fp] = {"type": "edit", "original": original}
+                                except Exception:
+                                    pass
+                            else:  # write_file — new file, undo = delete
+                                file_exists = os.path.exists(full_fp)
+                                if file_exists:
+                                    try:
+                                        with open(full_fp, "r", encoding="utf-8", errors="replace") as fh:
+                                            original = fh.read()
+                                        undo_store[fp] = {"type": "edit", "original": original}
+                                    except Exception:
+                                        pass
+                                else:
+                                    undo_store[fp] = {"type": "new_file"}
+                            cl.user_session.set("undo_store", undo_store)
 
                     await _update_progress(label)
 
@@ -499,49 +512,79 @@ async def main(message: cl.Message):
                     except Exception:
                         pass
 
-                    # Diff viewer + Undo button after edit_file
-                    if tool_name == "edit_file":
+                    # Diff viewer + Undo button after edit_file / write_file
+                    if tool_name in ("edit_file", "write_file"):
                         fp = tool_input_data.get("file_path") or tool_input_data.get("path", "")
                         undo_store = cl.user_session.get("undo_store") or {}
-                        original = undo_store.get(fp)
-                        if fp and original is not None:
+                        snap = undo_store.get(fp)
+                        if fp and snap is not None:
                             workspace_path = cl.user_session.get("workspace", "")
-                            full_fp = os.path.join(workspace_path, fp) if workspace_path else fp
+                            full_fp = fp if os.path.isabs(fp) else os.path.join(workspace_path, fp)
+                            # Derive a display-friendly relative path
+                            try:
+                                display_fp = os.path.relpath(full_fp, workspace_path) if workspace_path else fp
+                            except ValueError:
+                                display_fp = fp
                             try:
                                 with open(full_fp, "r", encoding="utf-8", errors="replace") as fh:
                                     new_content = fh.read()
                                 import difflib
-                                diff_lines = list(difflib.unified_diff(
-                                    original.splitlines(keepends=True),
-                                    new_content.splitlines(keepends=True),
-                                    fromfile=f"a/{fp}", tofile=f"b/{fp}", n=3
-                                ))
-                                diff_text = "".join(diff_lines[:120])
-                                if diff_text:
+                                snap_type = snap["type"] if isinstance(snap, dict) else "edit"
+                                original = snap.get("original", "") if isinstance(snap, dict) else snap
+                                if snap_type == "new_file":
+                                    # Show the new file content as a pure addition diff
+                                    added_lines = new_content.splitlines(keepends=True)[:120]
+                                    diff_text = f"--- /dev/null\n+++ b/{display_fp}\n"
+                                    diff_text += "".join(f"+{line}" for line in added_lines)
+                                    if len(new_content.splitlines()) > 120:
+                                        diff_text += "\n... [truncated]"
                                     await cl.Message(
-                                        content=f"✏️ **Changed `{fp}`**\n```diff\n{diff_text}\n```",
+                                        content=f"📝 **Created `{display_fp}`**\n```diff\n{diff_text}\n```",
                                         actions=[cl.Action(
                                             name="undo",
-                                            payload={"file": fp},
-                                            label="↩️ Undo this change"
+                                            payload={"file": fp, "type": "new_file"},
+                                            label="↩️ Delete this file"
                                         )],
                                     ).send()
                                 else:
-                                    await cl.Message(content=f"✏️ **Edited `{fp}`** (no diff detected)").send()
+                                    diff_lines = list(difflib.unified_diff(
+                                        original.splitlines(keepends=True),
+                                        new_content.splitlines(keepends=True),
+                                        fromfile=f"a/{display_fp}", tofile=f"b/{display_fp}", n=3
+                                    ))
+                                    diff_text = "".join(diff_lines[:120])
+                                    if diff_text:
+                                        await cl.Message(
+                                            content=f"✏️ **Changed `{display_fp}`**\n```diff\n{diff_text}\n```",
+                                            actions=[cl.Action(
+                                                name="undo",
+                                                payload={"file": fp, "type": "edit"},
+                                                label="↩️ Undo this change"
+                                            )],
+                                        ).send()
+                                    else:
+                                        await cl.Message(content=f"✏️ **Edited `{display_fp}`** (no diff detected)").send()
                             except Exception as e:
-                                await cl.Message(content=f"✏️ **Edited `{fp}`**").send()
+                                await cl.Message(content=f"✏️ **Edited `{display_fp}`**").send()
 
                         # Mark only the targeted findings for this file as fixed
                         if fp and not out_str.startswith("Error") and _fixing_ids:
                             try:
+                                workspace_path = cl.user_session.get("workspace", "")
+                                # Normalize fp to a relative path for matching against finding file_path
+                                try:
+                                    rel_fp = os.path.relpath(fp, workspace_path) if (workspace_path and os.path.isabs(fp)) else fp
+                                except ValueError:
+                                    rel_fp = fp
                                 for fnd in session_findings:
                                     fnd_db_id = fnd.get("db_id") or fnd.get("id")
                                     fnd_seq_id = fnd.get("id")
-                                    # Match if this finding was in the fix target list AND is in this file
+                                    fnd_file = fnd.get("file_path", "")
                                     file_match = (
-                                        fnd.get("file_path", "").endswith(fp.lstrip("/\\"))
-                                        or fp.endswith(fnd.get("file_path", ""))
-                                        or fnd.get("file_path", "") == fp
+                                        fnd_file == rel_fp
+                                        or fnd_file == fp
+                                        or rel_fp.endswith(fnd_file)
+                                        or fnd_file.endswith(rel_fp.lstrip("/\\"))
                                     )
                                     if file_match and fnd_seq_id in _fixing_ids:
                                         if fnd_db_id:
@@ -595,6 +638,7 @@ async def main(message: cl.Message):
                                 db_id = await db_record_finding(
                                     thread_id, fp, int(ln or 0), crit, cat, title, desc, sug,
                                     finding_id=finding_count, estimated_fix_tokens=est_tokens,
+                                    workspace=cl.user_session.get("workspace", ""),
                                 )
                                 finding["db_id"] = db_id
                             except Exception:
@@ -865,30 +909,44 @@ async def _update_task_list(todos):
 
 @cl.action_callback("undo")
 async def on_undo_action(action: cl.Action):
-    """Handle undo button — restore file from pre-edit snapshot."""
-    fp = (action.payload or {}).get("file", "")
-    if not fp:
-        # Try to extract from action name: undo_<filepath>
-        fp = action.name.replace("undo_", "", 1) if action.name.startswith("undo_") else ""
+    """Handle undo button — restore file from pre-edit snapshot, or delete a newly created file."""
+    payload = action.payload or {}
+    fp = payload.get("file", "")
+    snap_type = payload.get("type", "edit")
+
     if not fp:
         await cl.Message(content="❌ Could not determine file to undo.").send()
         return
 
     undo_store = cl.user_session.get("undo_store") or {}
-    original = undo_store.get(fp)
-    if original is None:
+    snap = undo_store.get(fp)
+    if snap is None:
         await cl.Message(content=f"❌ No snapshot found for `{fp}`.").send()
         return
 
     workspace_path = cl.user_session.get("workspace", "")
-    full_fp = os.path.join(workspace_path, fp) if workspace_path else fp
+    full_fp = fp if os.path.isabs(fp) else os.path.join(workspace_path, fp)
     try:
-        with open(full_fp, "w", encoding="utf-8") as fh:
-            fh.write(original)
-        # Remove from undo store so it can't be undone twice
-        undo_store.pop(fp, None)
-        cl.user_session.set("undo_store", undo_store)
-        await cl.Message(content=f"↩️ Restored `{fp}` to its pre-fix state.").send()
+        display_fp = os.path.relpath(full_fp, workspace_path) if workspace_path else fp
+    except ValueError:
+        display_fp = fp
+
+    try:
+        if snap_type == "new_file" or (isinstance(snap, dict) and snap.get("type") == "new_file"):
+            # Undo a file creation — delete the file
+            if os.path.exists(full_fp):
+                os.remove(full_fp)
+            undo_store.pop(fp, None)
+            cl.user_session.set("undo_store", undo_store)
+            await cl.Message(content=f"↩️ Deleted `{display_fp}` (creation undone).").send()
+        else:
+            # Undo an edit — restore original content
+            original = snap.get("original", "") if isinstance(snap, dict) else snap
+            with open(full_fp, "w", encoding="utf-8") as fh:
+                fh.write(original)
+            undo_store.pop(fp, None)
+            cl.user_session.set("undo_store", undo_store)
+            await cl.Message(content=f"↩️ Restored `{display_fp}` to its pre-fix state.").send()
     except Exception as e:
         await cl.Message(content=f"❌ Undo failed: {e}").send()
 

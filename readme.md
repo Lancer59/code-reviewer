@@ -1,4 +1,4 @@
-# Code Reviewer
+# Dev Companion
 
 **Chat UI:** http://localhost:8001  
 **Dashboard:** http://localhost:8001/dashboard

@@ -1,5 +1,5 @@
 """
-Git tools for Code Reviewer.
+Git tools for Dev Companion.
 Read-only tools for review, write tools for the fix workflow (git-agent subagent).
 Excluded: git_push, git_pull, git_clone — reviewer is read-only by default.
 """

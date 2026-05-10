@@ -1,4 +1,4 @@
-# Code Reviewer — Architecture
+# Dev Companion — Architecture
 
 ## Overview
 

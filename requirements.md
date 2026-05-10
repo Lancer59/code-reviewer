@@ -1,4 +1,4 @@
-# Code Reviewer — Feature Requirements
+# Dev Companion — Feature Requirements
 
 **Project:** code-reviewer (standalone deepagents + Chainlit)  
 **Status:** v1 built, v2 planned  

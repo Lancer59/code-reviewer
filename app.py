@@ -1,5 +1,5 @@
 """
-Production entry point for Code Reviewer.
+Production entry point for Dev Companion.
 
 Run with:
     uvicorn app:app --host 127.0.0.1 --port 8001
@@ -27,7 +27,7 @@ async def lifespan(app: FastAPI):
     os._exit(0)
 
 
-app = FastAPI(title="Code Reviewer", lifespan=lifespan)
+app = FastAPI(title="Dev Companion", lifespan=lifespan)
 
 for route in dashboard_app.routes:
     app.routes.append(route)
