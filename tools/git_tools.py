@@ -352,7 +352,9 @@ async def git_push(repo_path: str, remote: str = "origin", branch: str = "") -> 
     def _run():
         repo = _safe_repo(repo_path)
         target_branch = branch.strip() or repo.active_branch.name
-        pat = cfg("_SESSION_GIT_PAT", "")
+        # Read directly from os.environ — this is a session-scoped runtime key,
+        # not a config.json key, so bypass cfg() to avoid any stale module cache
+        pat = os.environ.get("_SESSION_GIT_PAT", "").strip()
 
         if not repo.remotes:
             return "Error: No remotes configured on this repository."
@@ -396,6 +398,6 @@ async def git_push(repo_path: str, remote: str = "origin", branch: str = "") -> 
     try:
         return await asyncio.to_thread(_run)
     except Exception as e:
-        pat = cfg("_SESSION_GIT_PAT", "")
+        pat = os.environ.get("_SESSION_GIT_PAT", "")
         safe = str(e).replace(pat, "***") if pat else str(e)
         return f"Error: {safe}"

@@ -302,7 +302,6 @@ async def _onboard_cloud() -> str | None:
 
     cl.user_session.set("repo_url", repo_url)
     cl.user_session.set("cloned_workspace", workspace)
-    cl.user_session.set("git_pat", cl.user_session.get("git_pat", ""))
 
     return workspace
 
@@ -311,11 +310,15 @@ async def _init_agent_session(workspace: str) -> None:
     """Shared agent initialisation after onboarding."""
     project_folder = os.path.basename(workspace)
 
-    # Expose PAT to git_push tool via os.environ so cfg() can read it
+    # Expose PAT to git_push tool via os.environ so cfg() can read it.
+    # Also log so we can diagnose if it's missing.
     git_pat = cl.user_session.get("git_pat", "")
     if git_pat:
         os.environ["_SESSION_GIT_PAT"] = git_pat
         os.environ["_SESSION_GIT_REPO_URL"] = cl.user_session.get("git_repo_url", "")
+        logger.info("PAT set in os.environ for git_push (length=%d)", len(git_pat))
+    else:
+        logger.warning("No PAT in session — git_push will fail if repo is private")
 
     try:
         msg = cl.Message(content="⚙️ Initialising review agent...")
