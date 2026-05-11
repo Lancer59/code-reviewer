@@ -102,7 +102,7 @@ def f(finding: str) -> str:
 # System prompts
 # ---------------------------------------------------------------------------
 
-REVIEW_PROMPT = """You are an expert code reviewer. Review the target repo and record every issue.
+REVIEW_PROMPT = """You are an expert code reviewer. Review the target repo and record the most important issues.
 
 ## Finding format (call `f` for each issue)
 FILE:LINE|CRIT|CAT|TITLE|DESC|FIX
@@ -114,14 +114,30 @@ C=critical(security/data-loss) H=high(prod bug) M=medium(quality) L=low(style) I
 ## Categories
 sec=security  bug=logic-error  perf=performance  maint=maintainability  style=style  doc=documentation
 
-## Workflow
-1. write_todos - plan passes: security, bugs, performance, maintainability, style
-2. Security pass: delegate to `security-scanner` subagent for the full codebase
-3. For each source file: delegate to `file-scanner` subagent - it returns findings, call `f` for each
-4. Use grep_search for cross-file patterns (TODO, FIXME, deprecated APIs)
-5. Final message: counts by criticality + top 3 issues + health score /10
+## Finding limit — HARD STOP at {max_findings} findings
+You MUST stop recording findings once you reach {max_findings} total.
+This is a hard limit — do not exceed it under any circumstances.
 
-Rules: be specific (file+line), be actionable (concrete fix), cover ALL files.
+Priority order (record these first, stop when limit is reached):
+1. Critical (C) — security vulnerabilities, data loss, auth bypass
+2. High (H) — production bugs, crashes, data corruption
+3. Medium (M) — quality issues that affect reliability
+4. Low (L) / Info (I) — only if budget remains after C/H/M
+
+Do NOT record:
+- Minor style nits if you already have {max_findings} findings
+- Duplicate patterns (one finding per pattern, not one per occurrence)
+- Obvious/trivial issues when serious ones exist
+
+## Workflow
+1. write_todos — plan passes: security, bugs, performance, maintainability, style
+2. Security pass: delegate to `security-scanner` subagent for the full codebase
+3. For each source file: delegate to `file-scanner` subagent — it returns findings, call `f` for each
+4. STOP immediately if you reach {max_findings} findings — do not scan more files
+5. Use grep_search for cross-file patterns (TODO, FIXME, deprecated APIs) — only if under limit
+6. Final message: counts by criticality + top 3 issues + health score /10
+
+Rules: be specific (file+line), be actionable (concrete fix).
 Delegate file reading to subagents — keep your own context for coordination only.
 
 ## Fixing Issues
@@ -145,15 +161,18 @@ IMPORTANT: Always use the exact repo_path provided below. Never use relative pat
 Return a one-line summary: "Committed and pushed branch <name>: <message>"
 """
 
-FILE_SCANNER_PROMPT = """You are a code quality scanner. Read the given file and return ALL issues found.
+FILE_SCANNER_PROMPT = """You are a code quality scanner. Read the given file and return the most important issues found.
 
 For each issue call `f` with: FILE:LINE|CRIT|CAT|TITLE|DESC|FIX
 CRIT: C=critical H=high M=medium L=low I=info
 CAT: sec bug perf maint style doc
 
-Be thorough — check for: hardcoded secrets, SQL injection, missing error handling,
+Priority: critical and high issues first. Skip trivial style nits if serious issues exist.
+Record at most 10 findings per file — focus on the worst ones.
+
+Check for: hardcoded secrets, SQL injection, missing error handling,
 logic bugs, performance issues, dead code, missing docs on public APIs.
-Cover every line. Return compact findings only, no prose."""
+Return compact findings only, no prose."""
 
 SECURITY_SCANNER_PROMPT = """You are a security-focused code auditor. Perform a dedicated OWASP Top 10 pass.
 
@@ -167,7 +186,8 @@ subprocess, pickle, yaml.load, assert, TODO, FIXME, hardcoded.
 For each issue call `f` with: FILE:LINE|CRIT|CAT|TITLE|DESC|FIX
 CRIT: C=critical H=high M=medium L=low I=info  CAT must be: sec
 
-Be aggressive — flag anything suspicious. False positives are acceptable."""
+Record at most 20 security findings total — prioritise critical and high severity.
+One finding per vulnerability pattern, not one per occurrence."""
 
 
 # ---------------------------------------------------------------------------
@@ -214,10 +234,13 @@ async def create_review_agent(
     repo_map = _build_repo_map(workspace_path, repo_folder)
     repo_map_section = f"\n\n## Repository Structure\n{repo_map}" if repo_map else ""
 
+    max_findings = cfg_int("MAX_FINDINGS", 50)
+
     resolved_prompt = (
-        REVIEW_PROMPT
+        REVIEW_PROMPT.format(max_findings=max_findings)
         + f"\n\nTarget folder: `{repo_folder}/` — use relative paths for findings."
         + f"\n\nFull workspace path (use this exact value as `repo_path` for ALL git tool calls): `{workspace_path}`"
+        + f"\n\n**HARD LIMIT: Stop after {max_findings} findings. Do not record finding #{max_findings + 1} or beyond.**"
         + repo_map_section
     )
 

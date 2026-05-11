@@ -757,6 +757,15 @@ async def main(message: cl.Message):
                             findings_this_turn += 1
                             cl.user_session.set("finding_count", finding_count)
 
+                            # Hard limit — stop recording once cap is reached
+                            max_findings = cfg_int("MAX_FINDINGS", 50)
+                            if finding_count > max_findings:
+                                # Don't record to DB or show card — just silently drop
+                                logger.info("Finding cap (%d) reached — dropping finding #%d", max_findings, finding_count)
+                                finding_count -= 1  # don't count it
+                                cl.user_session.set("finding_count", finding_count)
+                                continue
+
                             workspace = cl.user_session.get("workspace", "")
                             est_tokens = None
                             try:
