@@ -44,10 +44,24 @@ def _safe_repo(path: str) -> Repo:
             f"workspace directory `{base_dir}`. Git operations are only "
             f"permitted on cloned repositories inside the workspaces folder."
         )
+
     try:
-        return Repo(abs_path, search_parent_directories=True)
+        repo = Repo(abs_path, search_parent_directories=True)
+        # Extra check: ensure the repo root is still inside the workspace,
+        # not a parent repo found by walking up (e.g. the code-reviewer repo itself)
+        repo_root = os.path.abspath(repo.working_dir)
+        if not repo_root.startswith(base_dir):
+            raise ValueError(
+                f"Security violation: resolved git repo root `{repo_root}` is outside "
+                f"the workspace directory `{base_dir}`."
+            )
+        return repo
     except InvalidGitRepositoryError:
         raise ValueError(f"Not a git repository: {abs_path}")
+    except Exception as e:
+        if "Security violation" in str(e):
+            raise
+        raise ValueError(f"Cannot open repository at {abs_path}: {e}")
 
 
 def _repo(path: str) -> Repo:

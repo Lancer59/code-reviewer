@@ -20,7 +20,6 @@ def status():
 
 # Mount Dev Companion at /reviewer
 reviewer = create_app(
-    mount_path="/reviewer",
     config_file="/etc/reviewer/config.json",   # optional — see Config section
 )
 app.mount("/reviewer", reviewer)
@@ -42,11 +41,24 @@ That's all. Dev Companion is now live at:
 
 ---
 
+## How it works
+
+`create_app()` returns a FastAPI app with routes at:
+- `/health`
+- `/dashboard`
+- `/dashboard/api/...`
+- `/` (Chainlit UI)
+
+When you do `your_app.mount("/reviewer", reviewer)`, FastAPI automatically prepends `/reviewer` to all paths. No manual path manipulation needed.
+
+The dashboard frontend detects the mount prefix at runtime — the server injects `window.API_BASE` into the HTML so all API calls go to the correct prefixed path automatically.
+
+---
+
 ## `create_app()` signature
 
 ```python
 def create_app(
-    mount_path: str = "",
     config_file: str | None = None,
     title: str = "Dev Companion",
 ) -> FastAPI:
@@ -54,7 +66,6 @@ def create_app(
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `mount_path` | `""` | URL prefix the app is mounted at. Must match the path in `app.mount()`. E.g. `"/reviewer"`. Leave empty for root mount. |
 | `config_file` | `None` | Absolute path to a `config.json`. Sets `CONFIG_FILE` env var before any module is imported, so all Dev Companion config is isolated from the host app. |
 | `title` | `"Dev Companion"` | FastAPI app title (shows in `/docs`). |
 
@@ -62,13 +73,10 @@ def create_app(
 
 ## Config isolation via config.json
 
-The cleanest way to configure Dev Companion when mounting is a `config.json` file. Pass its path to `create_app()` and it takes priority over all environment variables.
+The cleanest way to configure Dev Companion when mounting is a `config.json` file:
 
 ```python
-reviewer = create_app(
-    mount_path="/reviewer",
-    config_file="/etc/reviewer/config.json",
-)
+reviewer = create_app(config_file="/etc/reviewer/config.json")
 ```
 
 Minimal `config.json` (copy from `config.json.example` for the full list):
@@ -117,16 +125,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from run import create_app
 
-reviewer_app = create_app(mount_path="/reviewer")
+reviewer_app = create_app()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Your startup
     await my_db.connect()
     yield
-    # Your shutdown
     await my_db.disconnect()
-    # Dev Companion shutdown (already handled internally, but safe to call again)
+    # Dev Companion cleanup
     try:
         import reviewer_ui
         if reviewer_ui._checkpointer_conn is not None:
@@ -187,4 +193,4 @@ Or use a `config.json` stored in `/home/` (persistent) and pass its path to `cre
 
 - **Single process** — Chainlit requires both the UI and API to run in the same process.
 - **Single replica** — SQLite doesn't support concurrent writes from multiple instances. Use one replica, or migrate `dashboard/db.py` to PostgreSQL for horizontal scaling.
-- **`os._exit(0)`** — Dev Companion's standalone lifespan calls `os._exit(0)` on shutdown to force-kill uvicorn. When mounted inside a host app, the `create_app()` lifespan does **not** call `os._exit(0)` — it only closes the DB connection, leaving clean shutdown to the host.
+- **Lifespan** — The `standalone` object's lifespan calls `os._exit(0)` on shutdown to force-kill uvicorn. When using `create_app()` inside a host app, the lifespan only closes the DB connection — clean shutdown is left to the host.

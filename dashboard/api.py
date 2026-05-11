@@ -7,8 +7,8 @@ import datetime
 from typing import Optional
 
 import aiosqlite
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, RedirectResponse, Response, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from dashboard.db import DB_PATH, DEFAULT_SYSTEM_PROMPT, get_config, save_config, update_finding_status
@@ -23,14 +23,39 @@ except Exception:
     pass
 
 
+def _get_api_base(request: Request) -> str:
+    """
+    Derive the correct API base URL from the incoming request path.
+    When mounted at /reviewer, requests arrive as /reviewer/dashboard/...
+    so we strip /dashboard/... to get /reviewer as the mount prefix.
+    """
+    path = request.url.path  # e.g. /reviewer/dashboard or /dashboard
+    # Find where /dashboard starts in the path
+    idx = path.find("/dashboard")
+    if idx > 0:
+        # Everything before /dashboard is the mount prefix
+        return path[:idx] + "/dashboard"
+    return "/dashboard"
+
+
 @dashboard_app.get("/dashboard/", include_in_schema=False)
-async def redirect():
-    return RedirectResponse(url="/dashboard")
+async def redirect(request: Request):
+    # Redirect to the correct prefixed path
+    base = _get_api_base(request)
+    return RedirectResponse(url=base.rstrip("/"))
 
 
 @dashboard_app.get("/dashboard", include_in_schema=False)
-async def index():
-    return FileResponse(os.path.join(_HERE, "static", "index.html"))
+async def index(request: Request):
+    """Serve index.html with the correct API base injected as window.API_BASE."""
+    api_base = _get_api_base(request)
+    html_path = os.path.join(_HERE, "static", "index.html")
+    with open(html_path, "r", encoding="utf-8") as f:
+        html = f.read()
+    # Inject window.API_BASE before the first <script> tag
+    inject = f'<script>window.API_BASE = "{api_base}";</script>\n'
+    html = html.replace("<script>", inject + "<script>", 1)
+    return HTMLResponse(content=html)
 
 
 def _dates(start, end):

@@ -261,7 +261,7 @@ function wsQ()   { return wsParam('?'); }
 async function refreshWorkspaces() {
   const sel = document.getElementById('filter-workspace');
   const current = sel.value;
-  const workspaces = await fetch('/dashboard/api/workspaces').then(r=>r.json()).catch(()=>[]);
+  const workspaces = await fetch((window.API_BASE||'/dashboard')+'/api/workspaces').then(r=>r.json()).catch(()=>[]);
   // Rebuild options preserving current selection
   sel.innerHTML = '<option value="">All Projects</option>';
   workspaces.forEach(ws => {
@@ -316,7 +316,7 @@ function statusBadge(s) {
 function fmt(n) { return (n||0).toLocaleString(); }
 
 async function loadSummary() {
-  const r = await fetch(`/dashboard/api/findings/summary${wsQ()}`).then(r=>r.json()).catch(()=>({}));
+  const r = await fetch(`${window.API_BASE||'/dashboard'}/api/findings/summary${wsQ()}`).then(r=>r.json()).catch(()=>({}));
   const bc = r.by_criticality || {};
   document.getElementById('cnt-critical').textContent = bc.critical || 0;
   document.getElementById('cnt-high').textContent = bc.high || 0;
@@ -342,7 +342,7 @@ async function loadSummary() {
 }
 
 async function loadTrend() {
-  const rows = await fetch(`/dashboard/api/findings/trend${wsQ()}`).then(r=>r.json()).catch(()=>[]);
+  const rows = await fetch(`${window.API_BASE||'/dashboard'}/api/findings/trend${wsQ()}`).then(r=>r.json()).catch(()=>[]);
   if (trendChart) trendChart.destroy();
   trendChart = new Chart(document.getElementById('chart-trend'), {
     type: 'line',
@@ -352,7 +352,7 @@ async function loadTrend() {
 }
 
 async function loadByFile() {
-  const rows = await fetch(`/dashboard/api/findings/by-file${wsQ()}`).then(r=>r.json()).catch(()=>[]);
+  const rows = await fetch(`${window.API_BASE||'/dashboard'}/api/findings/by-file${wsQ()}`).then(r=>r.json()).catch(()=>[]);
   if (byFileChart) byFileChart.destroy();
   byFileChart = new Chart(document.getElementById('chart-by-file'), {
     type: 'bar',
@@ -370,7 +370,7 @@ async function loadByFile() {
 }
 
 async function loadHeatmap() {
-  const data = await fetch(`/dashboard/api/findings/heatmap${wsQ()}`).then(r=>r.json()).catch(()=>({}));
+  const data = await fetch(`${window.API_BASE||'/dashboard'}/api/findings/heatmap${wsQ()}`).then(r=>r.json()).catch(()=>({}));
   const crits = ['critical','high','medium','low','info'];
   const cats = ['security','bug','perf','maint','style','doc'];
   const critColors = {'critical':'#7f1d1d','high':'#7c2d12','medium':'#713f12','low':'#1e3a5f','info':'#1e293b'};
@@ -397,7 +397,7 @@ async function loadFindings() {
   const crit = document.getElementById('filter-criticality').value;
   const cat  = document.getElementById('filter-category').value;
   const ws   = activeWorkspace();
-  let url = '/dashboard/api/findings?';
+  let url = (window.API_BASE||'/dashboard')+'/api/findings?';
   if (crit) url += `criticality=${encodeURIComponent(crit)}&`;
   if (cat)  url += `category=${encodeURIComponent(cat)}&`;
   if (ws)   url += `workspace=${encodeURIComponent(ws)}&`;
@@ -432,19 +432,19 @@ async function loadFindings() {
 }
 
 async function setStatus(id, status, btn) {
-  await fetch(`/dashboard/api/findings/${id}/status`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status}) });
+  await fetch(`${window.API_BASE||'/dashboard'}/api/findings/${id}/status`, { method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({status}) });
   loadFindings();
 }
 
 async function loadObservability() {
   const [summary, tokens, tools, models, sessions, findings, efficiency] = await Promise.all([
-    fetch('/dashboard/api/telemetry/summary').then(r=>r.json()).catch(()=>({})),
-    fetch('/dashboard/api/telemetry/tokens-over-time').then(r=>r.json()).catch(()=>[]),
-    fetch('/dashboard/api/telemetry/tools').then(r=>r.json()).catch(()=>[]),
-    fetch('/dashboard/api/telemetry/models').then(r=>r.json()).catch(()=>[]),
-    fetch('/dashboard/api/sessions').then(r=>r.json()).catch(()=>[]),
-    fetch('/dashboard/api/findings/summary').then(r=>r.json()).catch(()=>({})),
-    fetch('/dashboard/api/telemetry/efficiency').then(r=>r.json()).catch(()=>[]),
+    fetch((window.API_BASE||'/dashboard')+'/api/telemetry/summary').then(r=>r.json()).catch(()=>({})),
+    fetch((window.API_BASE||'/dashboard')+'/api/telemetry/tokens-over-time').then(r=>r.json()).catch(()=>[]),
+    fetch((window.API_BASE||'/dashboard')+'/api/telemetry/tools').then(r=>r.json()).catch(()=>[]),
+    fetch((window.API_BASE||'/dashboard')+'/api/telemetry/models').then(r=>r.json()).catch(()=>[]),
+    fetch((window.API_BASE||'/dashboard')+'/api/sessions').then(r=>r.json()).catch(()=>[]),
+    fetch((window.API_BASE||'/dashboard')+'/api/findings/summary').then(r=>r.json()).catch(()=>({})),
+    fetch((window.API_BASE||'/dashboard')+'/api/telemetry/efficiency').then(r=>r.json()).catch(()=>[]),
   ]);
 
   document.getElementById('obs-total-tokens').textContent = fmt(summary.total_tokens);
@@ -523,7 +523,7 @@ async function loadObservability() {
 }
 
 async function loadSessions() {
-  const sessions = await fetch('/dashboard/api/sessions').then(r=>r.json()).catch(()=>[]);
+  const sessions = await fetch((window.API_BASE||'/dashboard')+'/api/sessions').then(r=>r.json()).catch(()=>[]);
   const wrap = document.getElementById('sessions-list');
   if (!sessions.length) { wrap.innerHTML = '<div class="empty">No review sessions yet.</div>'; return; }
   wrap.innerHTML = `<table>
@@ -542,7 +542,7 @@ async function loadSessions() {
 }
 
 async function loadSessionDetail(threadId) {
-  const d = await fetch(`/dashboard/api/telemetry/sessions/${threadId}`).then(r=>r.json()).catch(()=>({}));
+  const d = await fetch(`${window.API_BASE||'/dashboard'}/api/telemetry/sessions/${threadId}`).then(r=>r.json()).catch(()=>({}));
   const el = document.getElementById('session-detail');
   el.style.display = 'block';
 
@@ -600,7 +600,7 @@ async function loadSessionDetail(threadId) {
 }
 
 async function loadConfig() {
-  const cfg = await fetch('/dashboard/api/config').then(r=>r.json()).catch(()=>({}));
+  const cfg = await fetch((window.API_BASE||'/dashboard')+'/api/config').then(r=>r.json()).catch(()=>({}));
   document.getElementById('cfg-provider').value = cfg.llm_provider || '';
   document.getElementById('cfg-model').value = cfg.model_name || '';
   document.getElementById('cfg-limit').value = cfg.iteration_limit || 80;
@@ -615,22 +615,22 @@ async function saveConfig() {
     llm_provider: document.getElementById('cfg-provider').value,
     model_name: document.getElementById('cfg-model').value,
   };
-  const r = await fetch('/dashboard/api/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
+  const r = await fetch((window.API_BASE||'/dashboard')+'/api/config', { method:'PUT', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) });
   document.getElementById('cfg-status').textContent = r.ok ? '✅ Saved' : '❌ Error saving';
   setTimeout(()=>document.getElementById('cfg-status').textContent='', 3000);
 }
 
 async function resetPrompt() {
-  await fetch('/dashboard/api/config/reset-prompt', { method:'POST' });
+  await fetch((window.API_BASE||'/dashboard')+'/api/config/reset-prompt', { method:'POST' });
   loadConfig();
 }
 
-async function exportData() { window.open('/dashboard/api/export', '_blank'); }
+async function exportData() { window.open((window.API_BASE||'/dashboard')+'/api/export', '_blank'); }
 
 function exportReport(type, threadId) {
   const tid = threadId || '';
   const ws  = activeWorkspace();
-  let url = `/dashboard/api/reports/${type}?`;
+  let url = `${window.API_BASE||'/dashboard'}/api/reports/${type}?`;
   if (tid) url += `thread_id=${encodeURIComponent(tid)}&`;
   if (ws)  url += `workspace=${encodeURIComponent(ws)}&`;
   window.open(url, '_blank');
