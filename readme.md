@@ -1,149 +1,140 @@
-# Dev Companion
+# Dev Companion — AI Code Reviewer
 
-**Chat UI:** http://localhost:8001  
-**Dashboard:** http://localhost:8001/dashboard
-
-An AI-powered code review agent built on [deepagents](https://github.com/langchain-ai/deepagents) + Chainlit. Point it at any local repository and it produces structured findings with criticality levels, categories, and actionable fix suggestions — with a full observability dashboard.
+An AI-powered code review agent. Point it at any Git repository and it produces structured findings with criticality levels, categories, and actionable fix suggestions — then applies fixes and pushes a PR-ready branch.
 
 ---
 
 ## Quick Start
 
 ```bash
-cd code-reviewer
-python -m venv env
-env\Scripts\activate        # Windows
-# source env/bin/activate   # macOS/Linux
-
+# Install dependencies
 pip install -r requirements.txt
+
+# Configure (copy and fill in your keys)
 cp .env.example .env
-# Edit .env — add your API key and set AZURE_OPENAI_DEPLOYMENT_NAME
 
-python init_db.py
-uvicorn app:app --host 127.0.0.1 --port 8001
+# Run
+uvicorn app:app --host 0.0.0.0 --port 8001
 ```
 
-Open http://localhost:8001, enter the folder name of the project to review (must be a sibling directory to `code-reviewer/`), then type `review`.
-
----
-
-## Project Structure
-
-```
-code-reviewer/
-├── app.py                  # Production entry point — mounts Chainlit + Dashboard on port 8001
-├── reviewer_ui.py          # Chainlit UI — streaming, finding cards, approvals, diff/undo
-├── review_agent.py         # DeepAgent factory — tools, subagents, prompts, interrupt_on
-├── llm_factory.py          # Multi-provider LLM factory (Azure, OpenAI, Gemini, Ollama)
-├── init_db.py              # One-time Chainlit SQLite schema setup
-├── tools/
-│   └── git_tools.py        # GitPython-based tools (status, diff, log, blame, branch, commit, stash)
-├── dashboard/
-│   ├── api.py              # FastAPI routes — findings, observability, reports, sessions
-│   ├── db.py               # SQLite helpers — findings, telemetry, review sessions
-│   └── static/
-│       └── index.html      # Dashboard SPA — findings, observability, sessions, settings tabs
-├── agent_data/             # Runtime databases (gitignored)
-├── .env.example            # All config options with documentation
-├── requirements.md         # Full v2 feature requirements
-└── requirements.txt
-```
+Open `http://localhost:8001` — you'll be prompted for a repo URL and PAT.
 
 ---
 
 ## How It Works
 
-1. Enter a project folder name — the agent maps it to a sibling directory
-2. The agent plans the review using `write_todos` (security pass, bug pass, performance, etc.)
-3. It delegates file reading to the `file-scanner` subagent and security scanning to `security-scanner`
-4. For every issue found, it calls the compact `f()` tool — one pipe-delimited string per finding
-5. Findings are persisted to SQLite and shown inline as colour-coded cards with token estimates
-6. After the review, say `fix #1`, `fix all critical`, or `fix auth.py` to apply fixes
-7. Fixes go through the `git-agent` subagent — branch, edit, commit — with diff viewer and undo
+### 1. Onboarding
+Enter a Git repository URL (and optionally a branch) plus a Personal Access Token. The app clones the repo into a temporary workspace. For public repos, type `skip` instead of a PAT.
 
----
+```
+https://github.com/org/repo          ← default branch
+https://github.com/org/repo develop  ← specific branch
+```
 
-## Fix Commands
+### 2. Review
+Type `review` to start. The agent:
+- Plans passes (security, bugs, performance, maintainability, style)
+- Delegates file reading to isolated subagents (keeps main context clean)
+- Records findings with criticality, category, file, line, description, and fix suggestion
+- Stops at a configurable finding limit (default: 50) — prioritises critical/high first
 
-| Say | Effect |
-|-----|--------|
-| `fix everything` | Fix all findings, critical → high → medium → low |
-| `fix all critical` | Fix only critical findings |
-| `fix #3` | Fix finding #3 by ID |
-| `fix #2 and #5` | Fix specific findings |
-| `fix auth.py` | Fix all findings in that file |
+### 3. Fix
+After the review, say what to fix:
+
+| Command | Effect |
+|---------|--------|
+| `fix everything` | All findings, critical → low |
+| `fix all critical` | Only critical findings |
+| `fix #3` | Finding #3 by ID |
+| `fix auth.py` | All findings in that file |
+
+Each fix shows a colour-coded diff with an Undo button. You approve before anything is written.
+
+### 4. Push
+After fixes are applied, the git-agent creates a branch (`fix/<slug>`), commits, and pushes to origin. Your PAT is used for the push — it's stored encrypted in the local database and deleted when the session ends.
 
 ---
 
 ## Subagents
 
-| Agent | Role | Tools |
-|-------|------|-------|
-| `file-scanner` | Reads a single file, returns all quality issues | `read_file`, `grep_search` |
-| `security-scanner` | Dedicated OWASP Top 10 + secrets pass | `read_file`, `grep_search` |
-| `git-agent` | Creates branch, applies fix, commits | `git_*`, `edit_file` |
+| Agent | Role |
+|-------|------|
+| `file-scanner` | Reads one file, returns all quality issues |
+| `security-scanner` | OWASP Top 10 + secrets + injection pass |
+| `git-agent` | Creates branch, commits, pushes fix branch |
 
 ---
 
-## Dashboard Tabs
+## Dashboard
 
-- **Findings** — summary cards, category/criticality charts, trend line, top-10-files bar, heatmap, filterable table with Fix/Dismiss buttons, HTML/XLSX export
-- **Observability** — token metrics, model distribution, tool success rates, efficiency charts, session drilldown with cost estimate
-- **Sessions** — review history per workspace with commit hash and scope
-- **Settings** — system prompt editor, iteration limit
+Available at `/dashboard` when running via `uvicorn app:app`.
 
----
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AZURE_OPENAI_API_KEY` | — | Azure OpenAI key |
-| `AZURE_OPENAI_ENDPOINT` | — | Azure endpoint URL |
-| `AZURE_OPENAI_DEPLOYMENT_NAME` | — | Model deployment name |
-| `OPENAI_API_KEY` | — | OpenAI key (alternative) |
-| `CHAINLIT_AUTH_SECRET` | — | Chainlit cookie secret |
-| `CHAINLIT_USER` / `CHAINLIT_PASSWORD` | `admin` / `admin` | Login credentials |
-| `ITERATION_LIMIT` | `150` | Max agent steps — increase for large repos |
-| `DEBUG_PRINT_PROMPT` | `false` | Print full prompt before each LLM call |
-| `REQUIRE_APPROVAL_GIT_COMMIT` | `true` | Pause for approval before committing |
-| `REQUIRE_APPROVAL_GIT_BRANCH` | `true` | Pause for approval before creating branch |
-| `REQUIRE_APPROVAL_EDIT` | `true` | Pause for approval before editing files |
-| `REQUIRE_APPROVAL_EXECUTE` | `false` | Pause for approval before shell commands |
-| `GIT_AUTH_TYPE` | `none` | Git auth: `none` / `https_token` / `https_basic` / `ssh` |
-| `GIT_TOKEN` | — | GitHub/GitLab PAT for HTTPS token auth |
-
-See `.env.example` for the full list with documentation.
+- **Findings** — table with criticality/category filters, per-project view, mark fixed/dismissed
+- **Observability** — token usage, tool invocations, session history, model distribution
+- **Reports** — export HTML or XLSX report for any session
+- **Settings** — configure system prompt, iteration limit, LLM provider
 
 ---
 
-## Token Efficiency Design
+## Configuration
 
-**Compact `f()` tool** — single pipe-delimited string instead of 7 named parameters. Schema shrinks from ~300 tokens to ~60 tokens per call (5× reduction).
+All configuration is read from (in priority order):
+1. `config.json` — rename `config.json.example` to `config.json` and fill in values
+2. Environment variables / `.env` file
+3. Built-in defaults
 
+Key settings:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `AZURE_OPENAI_API_KEY` | — | Azure OpenAI API key |
+| `AZURE_OPENAI_ENDPOINT` | — | Azure OpenAI endpoint URL |
+| `AZURE_OPENAI_DEPLOYMENT_NAME` | `gpt-4o` | Deployment name |
+| `ITERATION_LIMIT` | `150` | Max agent steps per turn |
+| `MAX_FINDINGS` | `50` | Hard cap on findings per review |
+| `AGENT_DATA_DIR` | `./agent_data` | SQLite database directory (mount Azure Files here) |
+| `WORKSPACE_BASE_DIR` | `./workspaces` | Cloned repo directory (ephemeral) |
+| `APP_BASE_URL` | `http://localhost:8001` | Public URL for dashboard links |
+| `CLEANUP_WORKSPACE_ON_EXIT` | `true` | Delete cloned repo when session ends |
+| `GIT_CLONE_DEPTH` | `1` | Shallow clone depth |
+| `MAX_CLONE_SIZE_MB` | `500` | Reject repos larger than this |
+| `CHAINLIT_USER` | `admin` | Login username — **change before deploying** |
+| `CHAINLIT_PASSWORD` | `admin` | Login password — **change before deploying** |
+
+---
+
+## Mounting in another FastAPI app
+
+```python
+from run import create_app
+
+reviewer = create_app(
+    mount_path="/reviewer",
+    config_file="/etc/reviewer/config.json",
+)
+your_app.mount("/reviewer", reviewer)
 ```
-Format:  FILE:LINE|CRIT|CAT|TITLE|DESC|FIX
-Example: auth.py:42|C|sec|Hardcoded API key|Key in source|Move to env var
-Codes:   CRIT = C H M L I   |   CAT = sec bug perf maint style doc
-```
 
-**Subagent context isolation** — file reads and security scans happen inside subagents. The main agent never sees raw file contents — only compact findings. Prevents context bloat on large codebases.
-
-**Tight system prompt** — ~400 tokens. No redundant prose, compact reference tables.
-
-**Repo map pruning** — capped at 150 files, excludes non-code files (`.md`, `.json`, `.yaml`, `.css`), shows file sizes so the agent prioritises what to read.
+See [MOUNTING.md](MOUNTING.md) for the full guide.
 
 ---
 
-## Running Without Docker
+## Docker
 
 ```bash
-# Development — Chainlit only (no dashboard)
-chainlit run reviewer_ui.py
-
-# Production — Chainlit + Dashboard on same port
-uvicorn app:app --host 127.0.0.1 --port 8001 --reload
+docker build -t dev-companion .
+docker run -p 8001:8001 \
+  -v /your/azure/files/mount:/app/agent_data \
+  --env-file .env \
+  dev-companion
 ```
+
+Or with docker-compose:
+```bash
+docker-compose up
+```
+
+For Azure Container Apps, mount an Azure Files share at `/app/agent_data` to persist the SQLite databases across restarts.
 
 ---
 
@@ -153,4 +144,15 @@ uvicorn app:app --host 127.0.0.1 --port 8001 --reload
 |------|---------|
 | `agent_data/chainlit_ui.db` | Chat threads and message history |
 | `agent_data/checkpoints_lg.db` | LangGraph agent state per thread |
-| `agent_data/dashboard.db` | Findings, LLM telemetry, review sessions |
+| `agent_data/dashboard.db` | Findings, telemetry, review sessions, encrypted PATs |
+
+---
+
+## Security notes
+
+- PATs are encrypted at rest (Fernet/AES-128) using a key derived from `CHAINLIT_AUTH_SECRET`
+- PATs are deleted from the database when the session ends
+- Git push uses the PAT injected directly into the HTTPS URL — never written to git config
+- The system credential manager is disabled for push operations to prevent accidental pushes to the wrong repo
+- Cloned workspaces are sandboxed — git tools refuse to operate outside `WORKSPACE_BASE_DIR`
+- Change `CHAINLIT_USER` and `CHAINLIT_PASSWORD` from their defaults before any deployment

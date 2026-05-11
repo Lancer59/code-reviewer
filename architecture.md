@@ -2,14 +2,13 @@
 
 ## Overview
 
-The system is a single-process Python application that combines a Chainlit chat UI, a FastAPI dashboard, and a LangGraph-based multi-agent review engine. Everything runs on one port (`8001`) via FastAPI's `mount_chainlit` integration.
+A single-process Python application combining a chat UI, a FastAPI dashboard, and a LangGraph-based multi-agent review engine. Everything runs on one port via FastAPI's `mount_chainlit` integration.
 
 ```
 Browser
   │
-  ├── /              → Chainlit chat UI  (reviewer_ui.py)
-  └── /dashboard     → FastAPI dashboard (dashboard/api.py)
-         │
+  ├── /              → Chat UI        (reviewer_ui.py)
+  └── /dashboard     → Dashboard API  (dashboard/api.py)
          └── /dashboard/api/*  → REST endpoints
 ```
 
@@ -18,19 +17,46 @@ Browser
 ## Process Architecture
 
 ```
-uvicorn app:app (port 8001)
+uvicorn app:app  (or  uvicorn run:standalone)
 │
 ├── FastAPI app
-│   ├── Chainlit mounted at /          ← reviewer_ui.py
-│   └── Dashboard routes at /dashboard ← dashboard/api.py
+│   ├── Chat UI mounted at /          ← reviewer_ui.py
+│   ├── Dashboard routes at /dashboard ← dashboard/api.py
+│   └── /health                        ← liveness probe
 │
-├── SQLite databases (agent_data/)
-│   ├── chainlit_ui.db     ← Chainlit threads, messages, users
-│   ├── checkpoints_lg.db  ← LangGraph state checkpoints
-│   └── dashboard.db       ← Findings, LLM calls, tool invocations, sessions
+├── SQLite databases  (agent_data/ — mount Azure Files here)
+│   ├── chainlit_ui.db      ← Chat threads, messages, users
+│   ├── checkpoints_lg.db   ← LangGraph state checkpoints
+│   └── dashboard.db        ← Findings, LLM calls, tool invocations,
+│                              review sessions, encrypted PATs
 │
 └── In-memory LangGraph store (InMemoryStore)
     └── Per-user long-term memory namespace
+```
+
+---
+
+## Onboarding Flow
+
+```
+User opens chat
+  │
+  ├── Step 1: Enter repo URL (+ optional branch)
+  │     e.g. "https://github.com/org/repo develop"
+  │
+  ├── Step 2: Enter PAT (or "skip" for public repos)
+  │
+  ├── git_clone(url, pat, branch)
+  │     └── Clones into workspaces/<repo>-<uuid>/
+  │
+  ├── save_pat(thread_id, encrypted_pat)  → dashboard.db
+  │     └── Fernet encryption, key derived from CHAINLIT_AUTH_SECRET
+  │
+  └── _init_agent_session(workspace, git_pat, git_repo_url)
+        ├── create_review_agent(workspace_path)
+        ├── os.environ["_SESSION_GIT_PAT"] = git_pat
+        ├── os.environ["_SESSION_GIT_THREAD_ID"] = thread_id
+        └── Ready ✅
 ```
 
 ---
@@ -41,43 +67,43 @@ uvicorn app:app (port 8001)
 User message
      │
      ▼
-Main Review Agent  (LangGraph ReAct, gpt-4o / gpt-5.3)
+Main Review Agent  (LangGraph ReAct, Azure OpenAI)
 │
-├── Tools (always available to main agent)
+├── Core tools
 │   ├── f()              — record a finding (compact pipe format)
 │   ├── git_status       — read-only git info
 │   ├── git_diff         — read-only diff
 │   ├── git_log          — read-only history
 │   └── git_blame        — read-only authorship
 │
-├── Backend tools (provided by LocalShellBackend)
+├── Backend tools  (LocalShellBackend — root_dir = parent of workspace)
 │   ├── read_file        — read any file in the workspace
 │   ├── grep_search      — regex search across files
 │   ├── write_todos      — manage the review task list
 │   └── edit_file        — write/patch a file (requires approval)
 │
-└── Subagents (isolated context windows)
+└── Subagents  (isolated context windows)
     │
     ├── file-scanner
-    │   ├── Purpose: read one file, return all quality issues
+    │   ├── Purpose: read one file, return quality issues (max 10/file)
     │   ├── Tools: read_file, grep_search
     │   └── Returns: compact findings list
     │
     ├── security-scanner
-    │   ├── Purpose: OWASP Top 10 + secrets + injection pass
+    │   ├── Purpose: OWASP Top 10 + secrets + injection pass (max 20 total)
     │   ├── Tools: read_file, grep_search (security patterns)
     │   └── Returns: security findings list
     │
     └── git-agent
-        ├── Purpose: apply fix, branch, commit
+        ├── Purpose: apply fix, branch, commit, push
         ├── Tools: git_create_branch, git_commit, git_stash,
-        │         git_status, git_diff, edit_file
-        └── Returns: commit hash + branch name
+        │         git_status, git_diff, git_push
+        └── Returns: "Committed and pushed branch <name>: <message>"
 ```
 
-### Why Subagents
+### Finding Limit
 
-Each subagent runs in its own isolated context window. The main agent delegates file reading to `file-scanner` and security scanning to `security-scanner` — it never sees raw file contents. This prevents context bloat: a 500-line file read stays inside the subagent; the main agent gets back 5 compact finding strings.
+The agent is instructed to stop at `MAX_FINDINGS` (default 50). Priority order: Critical → High → Medium → Low → Info. The UI also enforces this as a hard cap — findings beyond the limit are silently dropped.
 
 ---
 
@@ -88,7 +114,6 @@ User: "review"
   │
   ▼
 reviewer_ui.py: on_message()
-  │  builds input_data, injects diff context if scope=diff
   │
   ▼
 agent.astream_events()  ← LangGraph streams events
@@ -96,23 +121,20 @@ agent.astream_events()  ← LangGraph streams events
   ├── on_chat_model_stream  → stream tokens to UI (pre-tool only)
   │
   ├── on_tool_start
-  │   ├── store tool_input in tool_inputs[run_id]
   │   ├── snapshot file content if edit_file (for undo)
   │   ├── show agent banner (once per agent per turn)
-  │   ├── show tool step with descriptive label
-  │   └── update progress indicator
+  │   └── show tool step with descriptive label
   │
   ├── on_tool_end
-  │   ├── update step output
+  │   ├── update step output (steps stay visible — not removed)
   │   ├── record tool invocation duration + status to DB
-  │   ├── if edit_file → show diff + undo button, mark findings fixed
+  │   ├── if edit_file → show colour-coded diff + undo button
   │   └── if f() → parse FINDING|... → save to DB, show finding card
   │
   └── on_chat_model_end → record LLM token usage to DB
   │
   ▼
 finally block:
-  ├── clear progress indicator
   ├── set final message content
   ├── record review_session to DB
   └── show review summary with per-finding token estimates
@@ -120,13 +142,13 @@ finally block:
 
 ---
 
-## Data Flow — Fix
+## Data Flow — Fix + Push
 
 ```
 User: "fix #3"
   │
   ▼
-_parse_fix_targets() → {3}  (set of finding IDs to mark fixed)
+_parse_fix_targets() → {3}
   │
   ▼
 Main agent → delegates to git-agent subagent
@@ -137,20 +159,26 @@ git-agent:
   2. edit_file          → apply the fix       [requires approval]
   3. git_status         → verify change
   4. git_commit         → conventional commit [requires approval]
+  5. git_push           → push to origin      [requires approval]
+     │
+     └── PAT lookup:
+           1. os.environ["_SESSION_GIT_PAT"]   (fast path)
+           2. load_pat(thread_id) from DB       (fallback)
+           → inject into HTTPS URL for this push only
+           → GIT_TERMINAL_PROMPT=0 (no credential manager fallback)
   │
   ▼
 on_tool_end(edit_file):
-  ├── show unified diff in chat
+  ├── show unified diff (+N -N) in chat
   ├── show ↩️ Undo button
   └── mark finding #3 as "fixed" in dashboard.db
-       (only if file_path matches AND finding ID is in _fixing_ids)
 ```
 
 ---
 
 ## Human-in-the-Loop
 
-Write operations pause for user approval before executing. Configured via `.env`:
+Write operations pause for user approval. Configured via env/config:
 
 ```
 REQUIRE_APPROVAL_GIT_COMMIT=true
@@ -159,7 +187,44 @@ REQUIRE_APPROVAL_EDIT=true
 REQUIRE_APPROVAL_EXECUTE=true
 ```
 
-When a tool requiring approval is about to run, LangGraph raises an interrupt. The UI detects `state.next` with `tasks[0].interrupts`, shows an `AskActionMessage` with Approve/Reject buttons, then resumes with `Command(resume={"decisions": [{"type": "approve"}]})`.
+The approval UI shows a colour-coded unified diff for `edit_file`, formatted JSON for git operations, and bash for `execute`. The user sees exactly what will change before approving.
+
+---
+
+## PAT Security
+
+```
+Onboarding
+  └── save_pat(thread_id, pat, repo_url)
+        └── Fernet.encrypt(pat)  ← key = SHA-256(CHAINLIT_AUTH_SECRET)
+              └── stored in dashboard.db / session_pats table
+
+git_push
+  ├── os.environ["_SESSION_GIT_PAT"]  (set at session start)
+  └── load_pat(thread_id)             (DB fallback if env is empty)
+        └── Fernet.decrypt(token)
+
+on_chat_end
+  ├── delete_pat(thread_id)           (removed from DB)
+  └── os.environ.pop("_SESSION_GIT_PAT")
+```
+
+The PAT is never written to git config, never logged, and never stored in plaintext.
+
+---
+
+## Configuration System
+
+```
+config.py  (cfg(), cfg_bool(), cfg_int())
+  │
+  ├── 1. config.json          ← highest priority
+  │         (path: CONFIG_FILE env var, default: ./config.json)
+  ├── 2. os.environ / .env
+  └── 3. built-in defaults    ← lowest priority
+```
+
+When mounting inside a host app, pass `config_file=` to `create_app()` to isolate Dev Companion's config from the host's environment.
 
 ---
 
@@ -174,27 +239,26 @@ review_findings (
     criticality,          -- critical | high | medium | low | info
     category,             -- security | bug | performance | maintainability | style | documentation
     title, description, suggestion,
-    finding_id,           -- sequential ID within session (1, 2, 3...)
-    estimated_fix_tokens, -- (file_size / 4) * 1.5 + 300
+    finding_id,           -- sequential ID within session
+    estimated_fix_tokens,
     status,               -- open | fixed | dismissed
-    agent_name            -- which subagent found it
+    agent_name,           -- which subagent found it
+    workspace             -- project name (basename of workspace path)
 )
 
 llm_calls (
     id, thread_id, timestamp, model,
-    prompt_tokens, completion_tokens, total_tokens,
-    agent_name
+    prompt_tokens, completion_tokens, total_tokens, agent_name
 )
 
 tool_invocations (
-    id, thread_id, tool_name, timestamp,
-    duration_ms, status     -- success | failure | pending
+    id, thread_id, tool_name, timestamp, duration_ms,
+    status                -- success | failure | pending
 )
 
 review_sessions (
     id, thread_id, workspace, timestamp,
-    commit_hash,            -- git HEAD at review time
-    scope,                  -- full | diff
+    commit_hash, scope,   -- full | diff
     total_findings, model
 )
 
@@ -202,13 +266,20 @@ agent_config (
     id, system_prompt, iteration_limit,
     enabled_tools, llm_provider, model_name
 )
+
+session_pats (
+    thread_id PRIMARY KEY,
+    token,                -- Fernet-encrypted PAT
+    repo_url,
+    created_at
+)
 ```
 
 ---
 
 ## Finding Format
 
-The `f()` tool uses a compact pipe-delimited format to minimise token overhead:
+The `f()` tool uses a compact pipe-delimited format:
 
 ```
 FILE:LINE|CRIT|CAT|TITLE|DESC|FIX
@@ -220,32 +291,18 @@ Example:
 auth.py:42|C|sec|Hardcoded API key|Key committed to source|Move to os.getenv("API_KEY")
 ```
 
-The tool schema is ~60 tokens vs ~300 for a 7-parameter version — a 5× reduction that compounds across 20+ findings per review.
+The tool schema is ~60 tokens vs ~300 for a 7-parameter version — 5× reduction that compounds across many findings per review.
 
-The return value is a structured pipe string that the UI layer parses:
+Return value parsed by the UI:
 ```
 FINDING|auth.py|42|critical|security|Hardcoded API key|Key committed...|Move to env var
 ```
 
 ---
 
-## Review Scope Selection
+## Workspace Safety
 
-On re-review of a known repo, the UI checks `review_sessions` for a previous commit hash and offers:
-- **Full review** — entire codebase
-- **Diff review** — `git diff <last_commit>..HEAD` injected as context, agent focuses on changed files only
-
----
-
-## Token Efficiency Summary
-
-| Technique | Saving |
-|-----------|--------|
-| Compact `f()` tool schema | ~240 tokens per call (5× reduction) |
-| Subagent context isolation | File contents never in main context |
-| Repo map pruning (150 files, no md/json/yaml/css) | ~200–500 tokens on large repos |
-| Tight system prompt (~400 tokens) | ~400 tokens vs ~800 in v1 |
-| Suppress intermediate LLM streaming | No wasted render cycles |
+All git write tools (`git_create_branch`, `git_commit`, `git_push`, `git_stash`) call `_safe_repo()` which validates that `repo_path` is inside `WORKSPACE_BASE_DIR` before opening the repository. Any path outside the workspaces directory raises a `Security violation` error — preventing the agent from accidentally operating on the code-reviewer repo itself or any other path on the system.
 
 ---
 
@@ -270,3 +327,4 @@ On re-review of a known repo, the UI checks `review_sessions` for a previous com
 | GET | `/dashboard/api/reports/xlsx` | Download XLSX report |
 | GET | `/dashboard/api/config` | Get agent config |
 | PUT | `/dashboard/api/config` | Update agent config |
+| GET | `/health` | Liveness probe |

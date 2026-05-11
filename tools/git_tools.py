@@ -351,15 +351,12 @@ async def git_push(repo_path: str, remote: str = "origin", branch: str = "") -> 
     """
     # Try os.environ first (fastest path), then fall back to DB lookup
     pat = os.environ.get("_SESSION_GIT_PAT", "").strip()
-    print(f"[DEBUG git_push] os.environ PAT length={len(pat)}", flush=True)
     if not pat:
         thread_id = os.environ.get("_SESSION_GIT_THREAD_ID", "")
-        print(f"[DEBUG git_push] thread_id from env={thread_id[:8] if thread_id else 'EMPTY'}", flush=True)
         if thread_id:
             try:
                 from dashboard.db import load_pat as _load_pat
                 pat = await _load_pat(thread_id)
-                print(f"[DEBUG git_push] DB PAT length={len(pat)}", flush=True)
                 if pat:
                     logger.info("git_push: PAT loaded from DB for thread %s", thread_id[:8])
             except Exception as e:
