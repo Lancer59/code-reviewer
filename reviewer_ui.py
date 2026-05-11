@@ -673,13 +673,14 @@ async def main(message: cl.Message):
                                         new_content.splitlines(keepends=True),
                                         fromfile=f"a/{display_fp}", tofile=f"b/{display_fp}", n=3
                                     ))
+                                    # Ensure no missing-newline artifacts in the diff
                                     diff_text = "".join(diff_lines[:120])
                                     if diff_text:
                                         added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
                                         removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
                                         summary = f"  `+{added}` `−{removed}`"
                                         await cl.Message(
-                                            content=f"✏️ **Changed `{display_fp}`**{summary}\n```diff\n{diff_text}\n```",
+                                            content=f"✏️ **Changed `{display_fp}`**{summary}\n```diff\n{diff_text}```",
                                             actions=[cl.Action(name="undo", payload={"file": fp, "type": "edit"}, label="↩️ Undo this change")],
                                         ).send()
                                     else:
@@ -845,14 +846,23 @@ async def main(message: cl.Message):
                                     old_str = req_args.get("old_string", req_args.get("old_str", ""))
                                     new_str = req_args.get("new_string", req_args.get("new_str", ""))
                                     if old_str and new_str:
+                                        # Ensure both strings end with newline so unified_diff
+                                        # produces proper line-by-line output (not a single merged line)
+                                        old_norm = old_str if old_str.endswith("\n") else old_str + "\n"
+                                        new_norm = new_str if new_str.endswith("\n") else new_str + "\n"
                                         diff_lines = list(difflib.unified_diff(
-                                            old_str.splitlines(keepends=True),
-                                            new_str.splitlines(keepends=True),
-                                            fromfile="before", tofile="after", n=3,
+                                            old_norm.splitlines(keepends=True),
+                                            new_norm.splitlines(keepends=True),
+                                            fromfile=f"a/{fp}",
+                                            tofile=f"b/{fp}",
+                                            n=2,
                                         ))
-                                        diff_text = "".join(diff_lines[:80])
+                                        diff_text = "".join(diff_lines[:100])
+                                        added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+                                        removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+                                        summary = f"`+{added}` `−{removed}`"
                                         approval_content_parts.append(
-                                            f"✏️ **Edit `{fp}`**\n```diff\n{diff_text}\n```"
+                                            f"✏️ **Edit `{fp}`** — {summary}\n```diff\n{diff_text}```"
                                         )
                                     else:
                                         approval_content_parts.append(f"✏️ **Edit `{fp}`**")
