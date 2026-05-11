@@ -1,0 +1,32 @@
+/* Dev Companion — diff color overrides
+   Forces classic red/green diff colors regardless of the highlight.js theme.
+   Chainlit serves everything in public/ and injects custom.css automatically
+   when referenced via the config.toml custom_css field.
+*/
+
+/* Removed lines — red */
+.hljs-deletion,
+code.language-diff .hljs-deletion,
+pre code span.hljs-deletion {
+  color: #f87171 !important;        /* red-400 */
+  background-color: rgba(239, 68, 68, 0.15) !important;
+  display: inline-block;
+  width: 100%;
+}
+
+/* Added lines — green */
+.hljs-addition,
+code.language-diff .hljs-addition,
+pre code span.hljs-addition {
+  color: #4ade80 !important;        /* green-400 */
+  background-color: rgba(74, 222, 128, 0.12) !important;
+  display: inline-block;
+  width: 100%;
+}
+
+/* Hunk headers @@ ... @@ — blue */
+.hljs-meta,
+code.language-diff .hljs-meta {
+  color: #60a5fa !important;        /* blue-400 */
+  font-weight: 600;
+}

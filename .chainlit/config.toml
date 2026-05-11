@@ -37,8 +37,8 @@ alert_style = "classic"
 logo_file_url = "/public/logo.svg"
 default_avatar_file_url = "/public/avatar.svg"
 favicon = "/public/favicon.svg"
+custom_css = "/public/custom.css"
 hide_cot = false
-# Hides the "Built with Chainlit" watermark in the footer
 show_readme_as_default = true
 watermark = false
 
