@@ -11,11 +11,14 @@ import engineio
 engineio.payload.Payload.max_decode_packets = 100000
 
 from dotenv import load_dotenv
+load_dotenv()  # load .env first so env vars are available as fallback for cfg()
+
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.store.memory import InMemoryStore
 from chainlit.data.sql_alchemy import SQLAlchemyDataLayer
 from langgraph.types import Command
 
+from config import cfg, cfg_bool, cfg_int
 from review_agent import create_review_agent
 from dashboard.db import (
     init_db, get_config,
@@ -24,8 +27,8 @@ from dashboard.db import (
     record_review_session, get_last_review_session,
     update_finding_status as db_update_finding_status,
 )
+from tools.git_tools import git_clone, cleanup_workspace
 
-load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 # Keep other loggers quieter
@@ -116,14 +119,51 @@ def _tool_label(tool_name: str, tool_input) -> str:
         return f"🔧 {tool_name}"
 
 
+_APP_BASE_URL = cfg("APP_BASE_URL", "http://localhost:8001").rstrip("/")
+
+# Default workspace base dir — always use clone-based onboarding
+_WORKSPACE_BASE_DIR = cfg(
+    "WORKSPACE_BASE_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "workspaces"),
+)
+
+# Warn if default credentials are in use
+if cfg("CHAINLIT_USER", "admin") == "admin" and cfg("CHAINLIT_PASSWORD", "admin") == "admin":
+    logging.getLogger("ReviewerUI").warning(
+        "SECURITY: Default Chainlit credentials in use. "
+        "Set CHAINLIT_USER and CHAINLIT_PASSWORD in your .env or config.json before deploying."
+    )
+
+
+def _detect_provider(repo_url: str) -> tuple[str, str]:
+    """Return (provider_name, pat_guide_url) based on the repo URL."""
+    url = repo_url.lower()
+    if "github.com" in url:
+        return "GitHub", "https://github.com/settings/tokens"
+    elif "gitlab.com" in url:
+        return "GitLab", "https://gitlab.com/-/profile/personal_access_tokens"
+    elif "bitbucket.org" in url:
+        return "Bitbucket", "https://bitbucket.org/account/settings/app-passwords"
+    elif "dev.azure.com" in url or "visualstudio.com" in url:
+        return "Azure DevOps", "https://dev.azure.com → User Settings → Personal Access Tokens"
+    else:
+        return "your git provider", ""
+
+
 @cl.data_layer
 def get_data_layer():
-    return SQLAlchemyDataLayer(conninfo="sqlite+aiosqlite:///agent_data/chainlit_ui.db")
+    agent_data_dir = cfg(
+        "AGENT_DATA_DIR",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_data"),
+    )
+    os.makedirs(agent_data_dir, exist_ok=True)
+    db_path = os.path.join(agent_data_dir, "chainlit_ui.db")
+    return SQLAlchemyDataLayer(conninfo=f"sqlite+aiosqlite:///{db_path}")
 
 
 @cl.password_auth_callback
 async def auth_callback(username: str, password: str):
-    if username == os.getenv("CHAINLIT_USER", "admin") and password == os.getenv("CHAINLIT_PASSWORD", "admin"):
+    if username == cfg("CHAINLIT_USER", "admin") and password == cfg("CHAINLIT_PASSWORD", "admin"):
         user = cl.User(identifier=username, metadata={"role": "admin", "provider": "credentials"})
         from chainlit.data import get_data_layer as _dl
         dl = _dl()
@@ -137,7 +177,13 @@ async def get_checkpointer():
     global _checkpointer, _checkpointer_conn
     if _checkpointer is None:
         import aiosqlite
-        _checkpointer_conn = await aiosqlite.connect("agent_data/checkpoints_lg.db")
+        agent_data_dir = cfg(
+            "AGENT_DATA_DIR",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent_data"),
+        )
+        os.makedirs(agent_data_dir, exist_ok=True)
+        cp_path = os.path.join(agent_data_dir, "checkpoints_lg.db")
+        _checkpointer_conn = await aiosqlite.connect(cp_path)
         _checkpointer = AsyncSqliteSaver(_checkpointer_conn)
         await _checkpointer.setup()
     return _checkpointer
@@ -153,21 +199,134 @@ async def start():
         except Exception as e:
             logger.warning(f"init_db failed: {e}")
 
+    workspace = await _onboard_cloud()
+    if not workspace:
+        return
+
+    await _init_agent_session(workspace)
+
+
+async def _onboard_cloud() -> str | None:
+    """
+    Two-step onboarding for cloud deployments:
+    1. Ask for the Git repository URL
+    2. Ask for the PAT
+    3. Clone the repo and return the workspace path
+    """
+    await cl.Message(
+        content=(
+            "🔍 **Dev Companion — AI Code Reviewer**\n\n"
+            "I'll review your codebase and find bugs, security issues, and code quality problems.\n\n"
+            "To get started I need:\n"
+            "1. Your repository URL (HTTPS)\n"
+            "2. A Personal Access Token (PAT) with read access\n\n"
+            "_Your PAT is used only to clone the repo and is never stored._"
+        )
+    ).send()
+
+    # Step 1: URL (and optional branch)
+    for attempt in range(3):
+        res = await cl.AskUserMessage(
+            content=(
+                "**Step 1 / 2** — Enter the Git repository URL and (optionally) a branch, separated by a space:\n"
+                "_(e.g. `https://github.com/your-org/your-repo` or `https://github.com/your-org/your-repo develop`)_"
+            ),
+            timeout=300,
+        ).send()
+        if not res:
+            await cl.Message(content="⏱️ Timed out waiting for input. Please refresh and try again.").send()
+            return None
+
+        parts = res["output"].strip().split(None, 1)  # split on first whitespace
+        repo_url = parts[0]
+        repo_branch = parts[1].strip() if len(parts) > 1 else None
+
+        if repo_url.startswith("https://"):
+            break
+        await cl.Message(
+            content="❌ That doesn't look like a valid HTTPS git URL. Please try again.\n_(Must start with `https://`)_"
+        ).send()
+        if attempt == 2:
+            await cl.Message(content="Too many invalid attempts. Please refresh and try again.").send()
+            return None
+
+    # Detect provider and show PAT guidance
+    provider, guide_url = _detect_provider(repo_url)
+    guide_hint = f"\n\n📖 Create a {provider} PAT: {guide_url}" if guide_url else ""
+
+    # Step 2: PAT
     res = await cl.AskUserMessage(
-        content="🔍 **Dev Companion**\n\nEnter the project folder name to review (sibling to code-reviewer):"
+        content=(
+            f"**Step 2 / 2** — Enter your Personal Access Token (PAT) for **{provider}**:{guide_hint}\n\n"
+            "_For public repositories, type_ `skip` _to proceed without a token._"
+        ),
+        timeout=300,
     ).send()
     if not res:
-        return
+        await cl.Message(content="⏱️ Timed out. Please refresh and try again.").send()
+        return None
 
-    project_folder = res["output"].strip()
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(current_dir)
-    workspace = os.path.abspath(os.path.join(parent_dir, project_folder))
-    cl.user_session.set("workspace", workspace)
+    pat_input = res["output"].strip()
+    # Allow skipping for public repos
+    pat = "" if pat_input.lower() in ("skip", "none", "") else pat_input
 
-    if not os.path.exists(workspace):
-        await cl.Message(content=f"❌ Folder not found: `{workspace}`").send()
-        return
+    # Clone
+    branch_label = f" @ `{repo_branch}`" if repo_branch else ""
+    progress_msg = cl.Message(content=f"⏳ Cloning `{repo_url}`{branch_label}...")
+    await progress_msg.send()
+
+    try:
+        workspace = await git_clone(repo_url, pat, base_dir=_WORKSPACE_BASE_DIR, branch=repo_branch)
+        # Store PAT in session (in-memory only, never persisted to disk) so the
+        # git-agent can push the fix branch back to the remote after applying fixes.
+        if pat:
+            cl.user_session.set("git_pat", pat)
+            cl.user_session.set("git_repo_url", repo_url)
+    except ValueError as e:
+        await cl.Message(content=f"❌ {e}").send()
+        return None
+    finally:
+        pat = ""  # clear local variable regardless of outcome
+
+    # Count files and size for the progress message
+    try:
+        file_count = sum(len(files) for _, _, files in os.walk(workspace))
+        total_bytes = sum(
+            os.path.getsize(os.path.join(root, f))
+            for root, _, files in os.walk(workspace)
+            for f in files
+        )
+        size_str = f"{total_bytes / (1024*1024):.1f} MB"
+        progress_msg.content = f"✅ Cloned successfully ({file_count:,} files, {size_str})"
+    except Exception:
+        progress_msg.content = "✅ Cloned successfully"
+    await progress_msg.update()
+
+    # Store repo_url (without PAT) for display
+    cl.user_session.set("repo_url", repo_url)
+    cl.user_session.set("cloned_workspace", workspace)  # track for cleanup
+
+    # Make PAT available to git_push via cfg() — stored in session dict only,
+    # never written to disk. We use a per-session key in cl.user_session and
+    # expose it to the tool layer via a thread-local env var set in _init_agent_session.
+    cl.user_session.set("git_pat", pat if pat else "")
+
+    return workspace
+
+
+async def _init_agent_session(workspace: str) -> None:
+    """
+    Shared agent initialisation used by both cloud and local onboarding paths.
+    """
+    project_folder = os.path.basename(workspace)
+
+    # Expose PAT to git_push tool via os.environ so cfg() can read it.
+    # This is process-wide but the value is session-specific — acceptable for
+    # single-replica deployments. Cleared in on_chat_end.
+    git_pat = cl.user_session.get("git_pat", "")
+    if git_pat:
+        os.environ["_SESSION_GIT_PAT"] = git_pat
+        os.environ["_SESSION_GIT_REPO_URL"] = cl.user_session.get("repo_url", "")
 
     try:
         msg = cl.Message(content="⚙️ Initialising review agent...")
@@ -231,7 +390,6 @@ async def start():
                 cl.user_session.set("review_scope", scope)
                 cl.user_session.set("last_commit", last_commit)
                 if scope == "diff":
-                    # Get the actual diff to inject as context
                     try:
                         diff_output = repo.git.diff(f"{last_commit}..HEAD", "--stat")
                         full_diff = repo.git.diff(f"{last_commit}..HEAD")
@@ -245,7 +403,6 @@ async def start():
                     scope_hint = f"\n\n> Reviewing only changes since commit `{last_commit}` — say **`review`** to start."
                 else:
                     cl.user_session.set("diff_context", None)
-                    scope_hint = ""
         except Exception:
             cl.user_session.set("current_commit", None)
 
@@ -305,6 +462,20 @@ async def on_chat_resume(thread):
         cl.user_session.set("task_list", task_list)
     except Exception as e:
         await cl.Message(content=f"❌ Error resuming: {e}").send()
+
+
+@cl.on_chat_end
+async def on_chat_end():
+    """Clean up the cloned workspace when the session ends."""
+    # Clear PAT from environment
+    os.environ.pop("_SESSION_GIT_PAT", None)
+    os.environ.pop("_SESSION_GIT_REPO_URL", None)
+
+    if not cfg_bool("CLEANUP_WORKSPACE_ON_EXIT", True):
+        return
+    cloned = cl.user_session.get("cloned_workspace")
+    if cloned:
+        await cleanup_workspace(cloned)
 
 
 @cl.on_message
@@ -886,7 +1057,7 @@ async def main(message: cl.Message):
 
         for step in all_steps:
             try:
-                await step.remove()
+                await step.update()  # ensure final state is flushed — do NOT remove
             except Exception:
                 pass
 
@@ -958,7 +1129,7 @@ async def main(message: cl.Message):
                 f"{crit_line}"
                 f"{fix_hint}"
                 f"{est_block}\n\n"
-                f"📊 [View full dashboard](http://localhost:8001/dashboard)  "
+                f"📊 [View full dashboard]({_APP_BASE_URL}/dashboard)  "
                 f"·  [Export HTML](/dashboard/api/reports/html?thread_id={thread_id})"
                 f"  ·  [Export XLSX](/dashboard/api/reports/xlsx?thread_id={thread_id})"
             )

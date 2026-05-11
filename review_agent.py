@@ -10,9 +10,10 @@ from langchain_core.tools import tool
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend, CompositeBackend, StoreBackend
 from llm_factory import get_llm
+from config import cfg, cfg_bool, cfg_int
 from tools.git_tools import (
     git_status, git_diff, git_log, git_blame,
-    git_create_branch, git_commit, git_stash,
+    git_create_branch, git_commit, git_stash, git_push,
 )
 
 logger = logging.getLogger("review_agent")
@@ -139,8 +140,9 @@ Workflow:
 1. Try `git_status` to verify the codebase changes. If it fails (not a git repo), tell the user and stop.
 2. `git_create_branch` - create a new branch named fix/<short-slug>
 3. `git_commit` - commit with a conventional-commits message (e.g. "fix(security): move API key to env var")
+4. `git_push` - push the fix branch to origin so the user can open a PR. Use the branch name from step 2.
 
-Return a one-line summary: "Committed on branch <name>: <message>"""
+Return a one-line summary: "Committed and pushed branch <name>: <message>"""
 
 FILE_SCANNER_PROMPT = """You are a code quality scanner. Read the given file and return ALL issues found.
 
@@ -172,13 +174,13 @@ Be aggressive — flag anything suspicious. False positives are acceptable."""
 # ---------------------------------------------------------------------------
 
 def _build_interrupt_on() -> dict:
-    """Build interrupt_on from env vars. All write tools require approval by default."""
+    """Build interrupt_on from config. All write tools require approval by default."""
     gates = {
-        "git_commit":        os.getenv("REQUIRE_APPROVAL_GIT_COMMIT",  "true").lower() != "false",
-        "git_create_branch": os.getenv("REQUIRE_APPROVAL_GIT_BRANCH",  "true").lower() != "false",
-        "git_stash":         os.getenv("REQUIRE_APPROVAL_GIT_STASH",   "true").lower() != "false",
-        "edit_file":         os.getenv("REQUIRE_APPROVAL_EDIT",        "true").lower() != "false",
-        "execute":           os.getenv("REQUIRE_APPROVAL_EXECUTE",     "true").lower() != "false",
+        "git_commit":        cfg_bool("REQUIRE_APPROVAL_GIT_COMMIT",  True),
+        "git_create_branch": cfg_bool("REQUIRE_APPROVAL_GIT_BRANCH",  True),
+        "git_stash":         cfg_bool("REQUIRE_APPROVAL_GIT_STASH",   True),
+        "edit_file":         cfg_bool("REQUIRE_APPROVAL_EDIT",        True),
+        "execute":           cfg_bool("REQUIRE_APPROVAL_EXECUTE",     True),
     }
     return {
         name: {"allowed_decisions": ["approve", "reject"]}
@@ -213,7 +215,8 @@ async def create_review_agent(
 
     resolved_prompt = (
         REVIEW_PROMPT
-        + f"\n\nTarget folder: `{repo_folder}/` — use relative paths."
+        + f"\n\nTarget folder: `{repo_folder}/` — use relative paths for findings."
+        + f"\n\nFull workspace path (use this exact value as `repo_path` for ALL git tool calls): `{workspace_path}`"
         + repo_map_section
     )
 
@@ -224,9 +227,8 @@ async def create_review_agent(
             "Handles git operations (branching and committing). Use this ONLY AFTER you have "
             "already applied code fixes and the user has explicitly agreed to branch and commit them."
         ),
-        "system_prompt": GIT_AGENT_PROMPT,
-        "tools": [git_create_branch, git_commit, git_stash, git_status, git_diff],
-        # interrupt_on inherited from main agent — git_commit and git_create_branch will pause for approval
+        "system_prompt": GIT_AGENT_PROMPT + f"\n\nRepo path (use this exact string for repo_path in every tool call): `{workspace_path}`",
+        "tools": [git_create_branch, git_commit, git_stash, git_status, git_diff, git_push],
     }
 
     # File Scanner subagent — reads individual files in isolation, keeps main context clean
@@ -255,23 +257,23 @@ async def create_review_agent(
 
     core_tools = [f, git_status, git_diff, git_log, git_blame]
 
-    def make_backend(runtime):
-        return CompositeBackend(
-            default=shell_backend,
-            routes={"/memories/": StoreBackend(runtime, namespace=lambda ctx, uid=user_id: (uid,))}
-        )
+    # Build backend directly as an instance (callable factory is deprecated in deepagents 0.7.0)
+    backend = CompositeBackend(
+        default=shell_backend,
+        routes={"/memories/": StoreBackend(namespace=lambda ctx, uid=user_id: (uid,))}
+    )
 
     interrupt_on = _build_interrupt_on()
 
     agent = create_deep_agent(
         model=llm,
         system_prompt=resolved_prompt,
-        backend=make_backend,
+        backend=backend,
         checkpointer=checkpointer,
         store=store,
         tools=core_tools,
         subagents=[git_subagent, file_scanner_subagent, security_scanner_subagent],
         interrupt_on=interrupt_on,
     )
-    agent._iteration_limit = iteration_limit or int(os.getenv("ITERATION_LIMIT", "150"))
+    agent._iteration_limit = iteration_limit or cfg_int("ITERATION_LIMIT", 150)
     return agent

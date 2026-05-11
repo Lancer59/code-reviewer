@@ -1,942 +1,528 @@
-# Dev Companion — Feature Requirements
+# Dev Companion — Requirements v3
 
-**Project:** code-reviewer (standalone deepagents + Chainlit)  
-**Status:** v1 built, v2 planned  
-**Base:** Existing `review_agent.py`, `reviewer_ui.py`, `dashboard/` already implemented
-
----
-
-## Current State (v1 — Already Built)
-
-- DeepAgent reviews a codebase and calls `record_finding` for each issue
-- Findings stored in SQLite with criticality / category / file / line
-- Chainlit UI shows inline finding cards during review
-- Dashboard: Findings tab (table + donut + bar), Observability tab (tokens, tools), Settings tab
-- Session summary at end of review
+**Project:** code-reviewer  
+**Status:** v2 built, v3 planned  
+**Base:** Existing `review_agent.py`, `reviewer_ui.py`, `dashboard/`, `tools/git_tools.py` already implemented
 
 ---
 
-## v2 Requirements
+## Current State (v2 — Already Built)
+
+- DeepAgent reviews a codebase using compact `f()` tool (pipe-delimited findings)
+- Multi-agent architecture: main agent + file-scanner, security-scanner, git-agent subagents
+- Findings stored in SQLite (`dashboard.db`) with criticality / category / file / line / status
+- Chainlit UI with inline finding cards, agent banners, tool step labels, diff viewer + undo
+- Human-in-the-loop approvals for write operations (configurable via `.env`)
+- Dashboard: Findings tab, Observability tab, Settings tab, HTML + XLSX report export
+- Review scope selection (full vs diff since last commit)
+- Post-review fix workflow: "fix #1", "fix all critical", "fix auth.py", "fix everything"
+- FastAPI entry point (`app.py`) mounts Chainlit at `/` and dashboard at `/dashboard`
+- Git auth via env vars (`GIT_AUTH_TYPE`, `GIT_TOKEN`, etc.)
+- Workspace is currently a **local sibling folder** — user types the folder name at chat start
 
 ---
 
-### 0. Token Efficiency
+## v3 Requirements
 
-Token efficiency is a first-class concern. Every design decision should minimise tokens without sacrificing quality.
+---
 
-#### 0.1 Compact `record_finding` Tool
+### 1. Git Clone Onboarding Flow (Cloud-First)
 
-**Problem:** The current `record_finding` tool has 7 named parameters with verbose docstrings. The tool schema is sent on every LLM call (~300 tokens per call). With 20+ findings per review, the schema overhead alone is significant.
+**Problem:** The current onboarding asks for a local folder name. This only works when the repo is already on disk — it breaks in cloud deployments where there is no pre-existing code.
 
-**Solution — compact pipe-delimited single-string format:**
+**Solution:** Replace the folder-name prompt with a two-step onboarding that clones the repo from a URL using a PAT.
+
+#### 1.1 Onboarding Sequence
+
+When a new chat session starts, the agent must:
+
+1. Ask for the **Git repository URL** (HTTPS only — e.g. `https://github.com/org/repo`)
+2. Ask for the **Personal Access Token (PAT)** — displayed as a password field, never echoed back
+3. Validate both inputs before proceeding
+4. Clone the repo into a temporary working directory
+5. Confirm success and proceed with the review
+
+The agent must **never** proceed to review without both inputs being provided and validated.
+
+#### 1.2 UI Prompts
+
+Use `cl.AskUserMessage` for the URL and a masked input for the PAT:
+
+```
+Step 1/2 — Enter the Git repository URL:
+  (e.g. https://github.com/your-org/your-repo)
+
+Step 2/2 — Enter your Personal Access Token (PAT):
+  (This is used only to clone the repo and is never stored)
+```
+
+The PAT must be treated as a secret:
+- Never logged to stdout or any file
+- Never stored in the database
+- Never shown in the UI after submission
+- Cleared from memory after the clone completes
+
+#### 1.3 Clone Implementation
+
+Add a `git_clone` function to `tools/git_tools.py`:
 
 ```python
-@tool
-def f(finding: str) -> str:
-    """Record a finding. Format: FILE:LINE|CRIT|CAT|TITLE|DESC|FIX
-    CRIT: C=critical H=high M=medium L=low I=info
-    CAT: sec bug perf maint style doc
-    Example: auth.py:42|C|sec|Hardcoded secret|API key in source|Move to env var"""
+async def git_clone(repo_url: str, pat: str, target_dir: str) -> str:
+    """
+    Clone a repo using HTTPS + PAT auth.
+    Injects the PAT into the URL: https://<pat>@github.com/org/repo
+    Returns the path to the cloned directory on success.
+    Raises ValueError on failure.
+    """
 ```
 
-Benefits:
-- Tool schema shrinks from ~300 tokens to ~60 tokens — **5× reduction**
-- Single string argument instead of 7 named args — fewer tokens per call
-- The agent learns the compact format from the system prompt examples, not the docstring
-- Parsing happens server-side in the UI layer (same pipe-split logic, just shorter keys)
+Clone target: a subdirectory inside a configurable `WORKSPACE_BASE_DIR` (env var, defaults to `./workspaces/`). The folder name is derived from the repo name (last path segment of the URL, without `.git`).
 
-Criticality codes: `C` `H` `M` `L` `I`  
-Category codes: `sec` `bug` `perf` `maint` `style` `doc`
+If a folder with that name already exists, append a short UUID suffix to avoid collisions.
 
-#### 0.2 Tight System Prompt
+#### 1.4 Supported Providers
 
-The current system prompt is ~800 tokens. Target: ~400 tokens.
+The clone logic must work with:
+- GitHub (`github.com`)
+- GitLab (`gitlab.com` and self-hosted)
+- Bitbucket (`bitbucket.org`)
+- Azure DevOps (`dev.azure.com`)
+- Any other HTTPS git host
 
-Rules:
-- Remove redundant explanations — the agent already knows what security/bugs are
-- Use bullet lists not prose
-- Move category/criticality definitions to a compact reference table, not paragraphs
-- Remove "Rules" section — fold into the workflow steps
+PAT injection format: `https://<pat>@<host>/...` — this works for all providers above.
 
-#### 0.3 Subagent Context Isolation
+For Azure DevOps the format is slightly different: `https://<org>:<pat>@dev.azure.com/...` — handle this as a special case.
 
-Large file reads pollute the main agent's context. Subagents (see §5) isolate this — the main agent only sees the final compact findings list, not the raw file contents.
+#### 1.5 Error Handling
 
-#### 0.4 Repo Map Pruning
+| Error | User-facing message |
+|-------|---------------------|
+| Invalid URL format | "That doesn't look like a valid HTTPS git URL. Please try again." |
+| Auth failure (401/403) | "Authentication failed. Check your PAT has read access to this repo." |
+| Repo not found (404) | "Repository not found. Check the URL is correct and the PAT has access." |
+| Network error | "Could not reach the git host. Check your network connection." |
+| Disk full | "Not enough disk space to clone the repository." |
 
-Current repo map includes all source extensions. For large repos this can be 500+ tokens.
+After 3 failed attempts, end the session with a clear error message.
 
-Changes:
-- Cap at 150 files (down from 300)
-- Exclude `.md`, `.json`, `.yaml`, `.toml`, `.css` from the map (still reviewable on demand, just not listed upfront)
-- Show file sizes next to filenames so the agent can prioritise which files to read
+#### 1.6 Post-Clone State
+
+After a successful clone:
+- Set `workspace` in `cl.user_session` to the cloned directory path
+- Set `repo_url` in `cl.user_session` (for display purposes only)
+- Clear the PAT from all variables immediately
+- Proceed with the existing agent initialisation flow (same as current `start()` after workspace is set)
+
+#### 1.7 Workspace Cleanup
+
+Cloned repos accumulate on disk. Add a cleanup strategy:
+- On session end (`@cl.on_chat_end` or `lifespan` shutdown), delete the cloned workspace directory
+- Configurable via `CLEANUP_WORKSPACE_ON_EXIT=true` (default: `true` in cloud, `false` locally)
+- Log the cleanup action but do not fail if the directory is already gone
 
 ---
 
-### 1. Enhanced Observability Dashboard
+### 2. Cloud Readiness
 
-**Status:** Partially built — needs more depth
+**Goal:** The application must run correctly in a containerised cloud environment (Docker, Kubernetes, cloud run services) with no dependency on the local filesystem beyond ephemeral storage.
 
-#### 1.1 Additional Metric Cards
-Add to the Observability tab:
+#### 2.1 Dockerfile
 
-| Metric | Source |
-|--------|--------|
-| Avg tokens per review session | `llm_calls` grouped by `thread_id` |
-| Total review sessions | distinct `thread_id` count |
-| Avg findings per session | `review_findings` / sessions |
-| Most expensive session (tokens) | max `total_tokens` per `thread_id` |
-| Token efficiency ratio | findings / total_tokens (higher = more efficient) |
+Create a production-ready `Dockerfile`:
 
-#### 1.2 Additional Charts
+```dockerfile
+FROM python:3.11-slim
 
-| Chart | Type | Data |
-|-------|------|------|
-| Prompt vs Completion token split (stacked bar over time) | Stacked bar | `llm_calls` by date |
-| Model distribution | Doughnut | `llm_calls` grouped by `model` |
-| Tool call success vs failure rate | Grouped bar | `tool_invocations` by `tool_name` |
-| Findings trend over time | Line | `review_findings` by date |
-| Top 10 files by finding count | Horizontal bar | `review_findings` grouped by `file_path` |
-| Findings heatmap by category × criticality | CSS grid heatmap | `review_findings` cross-tab |
-| Tokens per finding (efficiency) | Line | `total_tokens / finding_count` per session |
-| Subagent token breakdown | Stacked bar | tokens by `agent_name` per session |
+WORKDIR /app
 
-#### 1.3 Session Detail Drilldown
-Clicking a session opens a detail panel:
-- All LLM calls (timestamp, model, tokens, agent_name)
-- All tool invocations (tool name, duration, status, agent_name)
-- All findings for that session
-- Total cost estimate (tokens × configurable $/1k rate)
-- Subagent breakdown: which agent used how many tokens
+# System deps: git (for cloning), build tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
-**New API endpoints:**
-```
-GET /dashboard/api/findings/by-file
-GET /dashboard/api/findings/trend
-GET /dashboard/api/findings/heatmap
-GET /dashboard/api/telemetry/sessions/{thread_id}   ← extend existing
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+# Create directories for runtime data
+RUN mkdir -p agent_data workspaces
+
+EXPOSE 8001
+
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8001"]
 ```
 
----
+Key points:
+- `git` must be installed in the image (needed for `gitpython` and `git clone`)
+- `agent_data/` holds SQLite databases — should be a mounted volume in production
+- `workspaces/` holds cloned repos — ephemeral, can be in-container storage
+- Run as non-root user in production (add `RUN useradd -m appuser && USER appuser`)
 
-### 2. Report Export (HTML + XLSX)
+#### 2.2 docker-compose.yml
 
-**Status:** Not built
+Provide a `docker-compose.yml` for local development and simple cloud deployments:
 
-#### 2.1 HTML Report
-Self-contained offline HTML. Content:
-- Header: project name, review date, model, total findings
-- Executive summary: findings by criticality (coloured cards), code health score
-- Findings table: sortable, filterable
-- Per-file breakdown: accordion sections
-- Appendix: full description + suggestion per finding
-
-Endpoint: `GET /dashboard/api/reports/html?thread_id=<id>`  
-Implementation: Python string templates, no Jinja2, inline CSS + vanilla JS.
-
-#### 2.2 XLSX Report
-Sheets: Summary, All Findings, By File, Observability.  
-Dependency: `openpyxl`. Conditional formatting on criticality column.  
-Endpoint: `GET /dashboard/api/reports/xlsx?thread_id=<id>`
-
----
-
-### 3. Post-Review Fix Workflow
-
-**Status:** Not built
-
-After review, agent sends:
-```
-Review complete. 12 issues (2 critical, 4 high, 6 medium).
-
-Fix options:
-  • "fix everything"
-  • "fix all critical"
-  • "fix #3" or "fix auth.py"
-
-Est. tokens per fix:
-  #1 [C] config.py:12 Hardcoded secret — ~800 tokens
-  #2 [C] db.py:88 SQL injection — ~1,200 tokens
+```yaml
+version: "3.9"
+services:
+  code-reviewer:
+    build: .
+    ports:
+      - "8001:8001"
+    volumes:
+      - ${AGENT_DATA_MOUNT:-./agent_data}:/app/agent_data   # Azure Files share or local dir
+    env_file:
+      - .env
+    environment:
+      - AGENT_DATA_DIR=/app/agent_data
+      - WORKSPACE_BASE_DIR=/app/workspaces
+      - CLEANUP_WORKSPACE_ON_EXIT=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 ```
 
-Token estimate formula: `(file_size_chars / 4) * 1.5 + 300`
+For Azure Container Apps, the Azure Files share is mounted directly at `/app/agent_data` via the container app's volume configuration — the `docker-compose.yml` volume entry is only used for local dev.
 
-Fix modes: everything / by criticality / by ID / by file / multiple IDs.
+#### 2.3 Environment Variables — Cloud Additions
 
-Finding IDs are sequential per session. Cards show `#<id>` prefix.
-
----
-
-### 4. Git Integration
-
-**Status:** Not built
-
-#### 4.1 Git Tools (read-only for review, write for fix)
-Copy from ai-intern, standalone. Included: `git_status`, `git_diff`, `git_log`, `git_blame`, `git_create_branch`, `git_commit`, `git_stash`. Excluded: `git_push`, `git_pull`, `git_clone`.
-
-#### 4.2 Review Scope Selection
-On re-review of a known repo, ask:
-- A) Review only changes since last review (`git diff <last_commit>..HEAD`)
-- B) Full review
-
-Store `last_reviewed_commit` in `review_sessions` table.
-
-#### 4.3 Diff Screen with Undo
-After each fix, show `DiffViewer` with Undo button. Undo restores from pre-fix content stored in session state.
-
-#### 4.4 Review Sessions Table
-```sql
-CREATE TABLE IF NOT EXISTS review_sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    thread_id TEXT NOT NULL, workspace TEXT NOT NULL,
-    timestamp TEXT NOT NULL, commit_hash TEXT,
-    scope TEXT, total_findings INTEGER, model TEXT
-);
-```
-
----
-
-### 5. Multi-Agent Architecture
-
-**Status:** Not built
-
-deepagents supports subagents natively via the `subagents=` parameter on `create_deep_agent`. Each subagent has its own tool set, system prompt, and isolated context window — the main agent only sees the final result, not intermediate tool calls.
-
-#### 5.1 Why Subagents Here
-
-The main review agent currently reads entire files into its context. A 500-file repo with 200-line average files = massive context bloat. Subagents solve this by doing the heavy reading in isolation and returning only compact findings.
-
-#### 5.2 Proposed Subagents
-
-**A. File Scanner Subagent**
-- **Purpose:** Read a single file, identify all issues, return compact findings list
-- **Tools:** `read_file`, `grep_search` (file-scoped)
-- **System prompt:** Focused on extracting issues from a single file, returning them in the compact `FILE:LINE|CRIT|CAT|TITLE|DESC|FIX` format
-- **Model:** Can use a cheaper/faster model (e.g. `gpt-4o-mini`) since it's pattern-matching, not reasoning
-- **Structured output:** Returns `list[FindingSchema]` (Pydantic) — main agent gets clean JSON, not raw text
-- **Token benefit:** Main agent never sees file contents. A 500-line file read stays inside the subagent. Main agent gets back 5 compact finding strings.
-
-**B. Security Scanner Subagent**
-- **Purpose:** Dedicated security pass — OWASP Top 10, secrets, injection, auth issues
-- **Tools:** `read_file`, `grep_search` (patterns: `password`, `secret`, `token`, `eval`, `exec`, `sql`, `query`)
-- **System prompt:** Security-only, OWASP-aware, aggressive about flagging anything suspicious
-- **Model:** Can use a reasoning model (o3-mini) for this pass since security requires deeper analysis
-- **Structured output:** Returns `list[SecurityFindingSchema]`
-- **Token benefit:** Security pass is isolated — its grep outputs and file reads don't pollute the main review context
-
-**C. Git Subagent**
-- **Purpose:** Handle all git operations during the fix workflow
-- **Tools:** `git_status`, `git_diff`, `git_create_branch`, `git_commit`, `git_stash`, `edit_file`
-- **System prompt:** "You apply code fixes and commit them. Create a branch, apply the fix, verify it compiles/lints, commit with a conventional-commits message."
-- **Structured output:** Returns `{"action": "committed", "branch": "...", "hash": "...", "files_changed": [...], "diff": "..."}`
-- **Token benefit:** All the git tool calls (status, diff, branch, edit, commit) stay inside the subagent. Main agent gets one clean JSON result and renders the DiffViewer.
-
-**D. Report Generator Subagent**
-- **Purpose:** Generate HTML/XLSX report content in isolation
-- **Tools:** `read_file` (to read findings from DB export), `write_file` (to write report to disk)
-- **System prompt:** "Generate a professional code review report from the provided findings JSON."
-- **Model:** Can use a cheaper model — report generation is templating, not reasoning
-- **Token benefit:** Report generation involves lots of string manipulation and file I/O. Keeping it isolated prevents the main context from filling with report content.
-
-#### 5.3 Architecture Diagram
-
-```
-Main Review Agent
-├── write_todos, record_finding (compact)
-├── Delegates file reading → File Scanner Subagent
-│     └── read_file, grep_search → returns [FindingSchema]
-├── Delegates security pass → Security Scanner Subagent
-│     └── read_file, grep_search (security patterns) → returns [SecurityFindingSchema]
-├── Delegates fix + commit → Git Subagent
-│     └── git_*, edit_file → returns {committed, hash, diff}
-└── Delegates report → Report Generator Subagent
-      └── write_file → returns {report_path}
-```
-
-#### 5.4 Implementation Notes
-
-```python
-# In create_review_agent():
-subagents = [
-    {
-        "name": "file-scanner",
-        "description": "Reads a single source file and returns all code issues found in it.",
-        "system_prompt": FILE_SCANNER_PROMPT,
-        "tools": [read_file_tool, grep_search_tool],
-        "model": "openai:gpt-4o-mini",  # cheaper for pattern matching
-        "response_format": FindingsList,  # Pydantic structured output
-    },
-    {
-        "name": "security-scanner",
-        "description": "Performs a dedicated security review pass on the codebase.",
-        "system_prompt": SECURITY_SCANNER_PROMPT,
-        "tools": [read_file_tool, grep_search_tool],
-        "model": "openai:o3-mini",  # reasoning model for security
-        "response_format": FindingsList,
-    },
-    {
-        "name": "git-agent",
-        "description": "Applies a code fix, creates a branch, and commits the change.",
-        "system_prompt": GIT_AGENT_PROMPT,
-        "tools": [git_status, git_diff, git_create_branch, git_commit, git_stash, edit_file_tool],
-        "response_format": GitActionResult,
-    },
-    {
-        "name": "report-generator",
-        "description": "Generates an HTML or XLSX report from the review findings.",
-        "system_prompt": REPORT_GENERATOR_PROMPT,
-        "tools": [write_file_tool],
-        "model": "openai:gpt-4o-mini",
-    },
-]
-```
-
-The main agent's system prompt instructs it to delegate file reading to `file-scanner` and security to `security-scanner`, keeping its own context clean for coordination and final summary.
-
----
-
-### 6. DB Schema Changes
-
-```sql
--- review_findings: add compact fields
-ALTER TABLE review_findings ADD COLUMN finding_id INTEGER;
-ALTER TABLE review_findings ADD COLUMN estimated_fix_tokens INTEGER;
-ALTER TABLE review_findings ADD COLUMN status TEXT DEFAULT 'open';
-ALTER TABLE review_findings ADD COLUMN agent_name TEXT;  -- which subagent found it
-
--- llm_calls: track which agent made the call
-ALTER TABLE llm_calls ADD COLUMN agent_name TEXT;
-
--- New: review_sessions
-CREATE TABLE IF NOT EXISTS review_sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    thread_id TEXT NOT NULL, workspace TEXT NOT NULL,
-    timestamp TEXT NOT NULL, commit_hash TEXT,
-    scope TEXT, total_findings INTEGER, model TEXT
-);
-```
-
----
-
-### 7. New API Endpoints
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/dashboard/api/findings/by-file` | Findings grouped by file_path |
-| GET | `/dashboard/api/findings/trend` | Findings count by date |
-| GET | `/dashboard/api/findings/heatmap` | category × criticality matrix |
-| GET | `/dashboard/api/reports/html` | Download HTML report |
-| GET | `/dashboard/api/reports/xlsx` | Download XLSX report |
-| GET | `/dashboard/api/sessions` | Review sessions list |
-| PATCH | `/dashboard/api/findings/{id}/status` | Mark finding fixed/dismissed |
-
----
-
-### 8. New Dependencies
-
-| Package | Purpose |
-|---------|---------|
-| `openpyxl>=3.1.0` | XLSX report generation |
-| `gitpython>=3.1.40` | Git integration |
-
----
-
-### 9. Implementation Priority
-
-| Priority | Feature | Effort |
-|----------|---------|--------|
-| 1 | Compact `record_finding` + tight system prompt (§0) | Low — high token ROI |
-| 2 | File Scanner + Security Scanner subagents (§5.2 A+B) | Medium |
-| 3 | Enhanced observability dashboard (§1) | Medium |
-| 4 | HTML + XLSX report export (§2) | Medium |
-| 5 | Post-review fix workflow (§3) | Medium |
-| 6 | Git subagent + diff/undo (§4 + §5.2 C) | Medium |
-| 7 | Report Generator subagent (§5.2 D) | Low |
-| 8 | Review scope selection (§4.2) | Medium |
-
----
-
-### 9b. UI — Agent & Tool Activity Display
-
-**Status:** Not built (v1 has basic step labels only)
-
-The Chainlit UI must clearly communicate what is happening at every moment. Users should never wonder "is it stuck?" or "which agent is running?".
-
-#### Agent Transition Banners
-
-When the main agent delegates to a subagent, show a prominent banner:
-
-```
-┌─────────────────────────────────────────────────────┐
-│  🔍 File Scanner  →  reading auth/login.py           │
-└─────────────────────────────────────────────────────┘
-```
-
-```
-┌─────────────────────────────────────────────────────┐
-│  🔒 Security Scanner  →  scanning for OWASP issues   │
-└─────────────────────────────────────────────────────┘
-```
-
-```
-┌─────────────────────────────────────────────────────┐
-│  🔧 Git Agent  →  creating branch fix/hardcoded-key  │
-└─────────────────────────────────────────────────────┘
-```
-
-Implementation: intercept `on_tool_start` for the `task` tool (which is how deepagents calls subagents). The tool input contains the subagent name — use it to render a `cl.Message` with a styled header before the step appears.
-
-#### Tool Step Labels — Full Map
-
-Every tool call gets a descriptive emoji label. No raw tool names shown to the user.
-
-| Tool | Label |
-|------|-------|
-| `ls` | `📂 Listing files...` |
-| `read_file` | `📄 Reading {filename}` |
-| `grep_search` | `🔎 Searching for {pattern}` |
-| `write_todos` | `📋 Updating plan...` |
-| `record_finding` | `📝 Recording finding #{n}` |
-| `edit_file` | `✏️ Editing {filename}` |
-| `write_file` | `📝 Creating {filename}` |
-| `execute` | `⚡ Running command` |
-| `git_status` | `🔍 Checking git status` |
-| `git_diff` | `📊 Reading diff` |
-| `git_create_branch` | `🌿 Creating branch {name}` |
-| `git_commit` | `💾 Committing changes` |
-| `git_stash` | `📦 Stashing changes` |
-| `task` | `🤖 Delegating to {subagent_name}` |
-
-For `read_file` and `grep_search`, extract the filename/pattern from `tool_input` and include it in the label so the user sees exactly what is being read.
-
-#### Progress Indicator During Review
-
-While the review is running, show a live progress line below the stream message:
-
-```
-🔍 Reviewing... 14 findings so far  |  security ✓  bugs ✓  performance →
-```
-
-Updated after each `record_finding` call and each todo item completion.
-
-Implementation: maintain a `review_progress` dict in `cl.user_session` tracking:
-- `findings_count` — incremented on each `record_finding`
-- `completed_passes` — list of todo items marked `done`
-- `current_pass` — current `in_progress` todo item
-
-Render as a `cl.Text` element that gets updated in-place.
-
-#### Finding Cards — Rich Format
-
-Current finding cards are plain markdown. Replace with a structured card:
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│  🔴 #1  CRITICAL · security                                   │
-│  Hardcoded API key in source code                            │
-│  ─────────────────────────────────────────────────────────── │
-│  📍 config.py : line 42                                      │
-│  ─────────────────────────────────────────────────────────── │
-│  The API key is committed directly to source control and     │
-│  will be exposed in git history.                             │
-│  ─────────────────────────────────────────────────────────── │
-│  💡 Move to environment variable: os.getenv("API_KEY")       │
-│  ─────────────────────────────────────────────────────────── │
-│  [Fix this]  [Dismiss]                                       │
-└──────────────────────────────────────────────────────────────┘
-```
-
-Implementation: use `cl.CustomElement` with a `FindingCard` JSX component (similar to existing `DiffViewer` and `TerminalOutput`). Props: `{ id, criticality, category, file_path, line_number, title, description, suggestion }`.
-
-The "Fix this" button triggers the fix workflow for that specific finding ID. "Dismiss" marks it dismissed in the DB.
-
-#### Review Complete Summary Card
-
-After the review, instead of a plain markdown summary, render a structured summary card:
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│  ✅ Review Complete — my-project                             │
-│  ─────────────────────────────────────────────────────────── │
-│  🔴 Critical: 2    🟠 High: 4    🟡 Medium: 6    🔵 Low: 3  │
-│  ─────────────────────────────────────────────────────────── │
-│  Code Health: 6.5 / 10                                       │
-│  Tokens used: 24,800  |  Duration: 3m 42s                    │
-│  ─────────────────────────────────────────────────────────── │
-│  [Fix all critical & high]  [Export HTML]  [Export XLSX]     │
-└──────────────────────────────────────────────────────────────┘
-```
-
-Implementation: `cl.CustomElement` with a `ReviewSummary` JSX component. Action buttons call back into the agent via `cl.Action`.
-
-#### Subagent Activity in Steps
-
-When a subagent is running, its internal tool calls appear as nested steps under the parent `task` step:
-
-```
-▼ 🤖 Delegating to file-scanner  (auth/login.py)
-    ├── 📄 Reading auth/login.py
-    ├── 🔎 Searching for password patterns
-    └── 📝 Recording finding #3
-```
-
-This is already how deepagents streams subagent events — the `lc_agent_name` metadata on each event identifies which agent fired it. Use this to nest steps correctly under the parent `task` step.
-
-#### New JSX Custom Elements Needed
-
-| Component | File | Purpose |
-|-----------|------|---------|
-| `FindingCard` | `public/elements/FindingCard.jsx` | Rich finding card with Fix/Dismiss buttons |
-| `ReviewSummary` | `public/elements/ReviewSummary.jsx` | End-of-review summary with action buttons |
-| `AgentBanner` | `public/elements/AgentBanner.jsx` | Agent transition banner (optional — can be plain `cl.Message`) |
-
----
-
-### 9d. Git Authentication
-
-**Status:** Not built
-
-All git auth is configured via `.env` — no settings page, no runtime prompts.
-
-#### Supported Auth Types
-
-| Type | When to use | Env vars |
-|------|-------------|----------|
-| `none` | Local repos only, no remote push/pull | — |
-| `https_token` | GitHub/GitLab/Bitbucket HTTPS with PAT | `GIT_AUTH_TYPE=https_token`, `GIT_TOKEN` |
-| `https_basic` | HTTPS with username + password | `GIT_AUTH_TYPE=https_basic`, `GIT_USERNAME`, `GIT_PASSWORD` |
-| `ssh` | SSH key auth | `GIT_AUTH_TYPE=ssh`, `GIT_SSH_KEY_PATH` (optional, defaults to `~/.ssh/id_rsa`) |
-
-Default: `GIT_AUTH_TYPE=none` — local operations only, no remote auth configured.
-
-#### Implementation
-
-A `_configure_git_auth(repo: Repo)` helper in `tools/git_tools.py` reads env vars and configures the repo's remote URL or SSH command before any push/pull operation:
-
-```python
-def _configure_git_auth(repo: Repo) -> None:
-    """Configure git remote auth from env vars. Called before push/pull."""
-    auth_type = os.getenv("GIT_AUTH_TYPE", "none").lower()
-
-    if auth_type == "https_token":
-        token = os.getenv("GIT_TOKEN", "")
-        if token and repo.remotes:
-            url = repo.remotes["origin"].url
-            # Inject token into HTTPS URL: https://token@github.com/...
-            if url.startswith("https://"):
-                authed = url.replace("https://", f"https://{token}@")
-                repo.remotes["origin"].set_url(authed)
-
-    elif auth_type == "https_basic":
-        username = os.getenv("GIT_USERNAME", "")
-        password = os.getenv("GIT_PASSWORD", "")
-        if username and password and repo.remotes:
-            url = repo.remotes["origin"].url
-            if url.startswith("https://"):
-                authed = url.replace("https://", f"https://{username}:{password}@")
-                repo.remotes["origin"].set_url(authed)
-
-    elif auth_type == "ssh":
-        key_path = os.getenv("GIT_SSH_KEY_PATH", os.path.expanduser("~/.ssh/id_rsa"))
-        # Set GIT_SSH_COMMAND so GitPython uses the specified key
-        os.environ["GIT_SSH_COMMAND"] = f"ssh -i {key_path} -o StrictHostKeyChecking=no"
-```
-
-This helper is called inside `git_push` and `git_pull` before the remote operation. It is NOT called for local operations (commit, branch, stash, diff, log).
-
-#### Security Notes
-
-- `GIT_TOKEN` and `GIT_PASSWORD` are treated as secrets — the `PromptDebugCallback` must NOT print these env vars even when `DEBUG_PRINT_PROMPT=true`
-- The injected URL with credentials is never logged or shown in the UI
-- For `https_token`, prefer fine-grained PATs scoped to the specific repo
-- For `ssh`, the key file must be readable by the process user; `StrictHostKeyChecking=no` is set for CI compatibility but can be tightened
-
-#### .env Configuration
+Add to `.env.example`:
 
 ```bash
-# Git authentication type: none | https_token | https_basic | ssh
-GIT_AUTH_TYPE=none
+# Cloud / Docker settings
+AGENT_DATA_DIR=./agent_data            # path to SQLite DB directory (mount Azure Files share here)
+WORKSPACE_BASE_DIR=./workspaces        # where cloned repos are stored (ephemeral, not mounted)
+CLEANUP_WORKSPACE_ON_EXIT=true         # delete workspace after session ends
 
-# HTTPS token auth (GitHub PAT, GitLab token, etc.)
-# GIT_TOKEN=ghp_your_personal_access_token
-
-# HTTPS basic auth
-# GIT_USERNAME=your_username
-# GIT_PASSWORD=your_password
-
-# SSH key auth (defaults to ~/.ssh/id_rsa if not set)
-# GIT_SSH_KEY_PATH=/path/to/your/private_key
+# Base URL — used for dashboard links in review summary
+# Set to your public URL in cloud deployments (e.g. https://myapp.azurecontainerapps.io)
+APP_BASE_URL=http://localhost:8001
 ```
 
----
+The existing `APP_BASE_URL` is currently hardcoded as `http://localhost:8001` in the review summary message. Replace all hardcoded localhost URLs with `os.getenv("APP_BASE_URL", "http://localhost:8001")`.
 
-### 9c. Human-in-the-Loop Approvals
+#### 2.4 Azure Blob Storage Mount
 
-**Status:** Not built
+The `agent_data/` directory (SQLite databases) is persisted via an Azure Blob Storage container mounted as a volume. This means:
 
-#### Overview
+- `dashboard.db`, `checkpoints_lg.db`, and `chainlit_ui.db` survive container restarts and redeployments
+- The mount point is configured via the `AGENT_DATA_DIR` env var (defaults to `./agent_data`)
+- In the `docker-compose.yml`, `agent_data/` maps to the Azure-mounted path on the host
+- No code changes needed — `aiosqlite` writes to whatever path `DB_PATH` resolves to
 
-The agent must not autonomously apply fixes or run git operations without explicit user approval. This mirrors the ai-intern pattern (`interrupt_on` in `create_deep_agent`) but is configurable entirely via `.env` — no settings page needed.
+**Azure Container Apps / ACI setup:**
+- Mount the Azure Files share at `/app/agent_data` inside the container
+- Set `AGENT_DATA_DIR=/app/agent_data` in the container environment
+- The share must be pre-created; the app creates the SQLite files on first run
 
-#### Approval Gates
+**Important:** SQLite is not safe for concurrent writes from multiple container instances. Keep the deployment to a single replica. If horizontal scaling is needed in the future, migrate to PostgreSQL (the `dashboard/db.py` abstraction makes this straightforward).
 
-| Tool | Default | Env var to disable |
-|------|---------|-------------------|
-| `git_commit` | ✅ requires approval | `REQUIRE_APPROVAL_GIT_COMMIT=false` |
-| `git_create_branch` | ✅ requires approval | `REQUIRE_APPROVAL_GIT_BRANCH=false` |
-| `git_stash` | ✅ requires approval | `REQUIRE_APPROVAL_GIT_STASH=false` |
-| `edit_file` (fix mode) | ✅ requires approval | `REQUIRE_APPROVAL_EDIT=false` |
-| `execute` | ✅ requires approval | `REQUIRE_APPROVAL_EXECUTE=false` |
+`workspaces/` (cloned repos) is intentionally **not** mounted to Azure storage — it is ephemeral per-container storage. Cloned repos are deleted on session end and do not need to persist.
 
-Read-only tools (`read_file`, `grep_search`, `ls`, `git_status`, `git_diff`, `git_log`, `git_blame`, `record_finding`) never require approval.
+#### 2.5 Health Check Endpoint
 
-#### Implementation
-
-`create_review_agent()` reads env vars at startup and builds the `interrupt_on` dict:
+Add a `/health` endpoint to `app.py` for container orchestration:
 
 ```python
-def _build_interrupt_on() -> dict:
-    """Build interrupt_on config from env vars. All write tools require approval by default."""
-    gates = {
-        "git_commit":        os.getenv("REQUIRE_APPROVAL_GIT_COMMIT",  "true").lower() != "false",
-        "git_create_branch": os.getenv("REQUIRE_APPROVAL_GIT_BRANCH",  "true").lower() != "false",
-        "git_stash":         os.getenv("REQUIRE_APPROVAL_GIT_STASH",   "true").lower() != "false",
-        "edit_file":         os.getenv("REQUIRE_APPROVAL_EDIT",        "true").lower() != "false",
-        "execute":           os.getenv("REQUIRE_APPROVAL_EXECUTE",     "true").lower() != "false",
-    }
-    return {
-        name: {"allowed_decisions": ["approve", "reject"]}
-        for name, required in gates.items()
-        if required
-    }
+@app.get("/health")
+async def health():
+    return {"status": "ok", "version": "3.0"}
 ```
 
-Passed to `create_deep_agent(interrupt_on=_build_interrupt_on())`.
+This is used by Docker healthchecks, Kubernetes liveness probes, and load balancers.
 
-The Git subagent inherits `interrupt_on` from the main agent by default (deepagents behaviour). This means `git_commit` inside the git-agent subagent also pauses for approval.
+#### 2.6 Stateless Session Design
 
-#### Approval UI
-
-When a tool requiring approval is about to run, the Chainlit UI shows:
-
-```
-⚠️ Approval Required
-
-git_commit
-  Branch: fix/hardcoded-api-key
-  Message: "fix(security): move API key to environment variable"
-  Files: config.py
-
-  [✅ Approve]  [❌ Reject]
-```
-
-Same `cl.AskActionMessage` pattern as ai-intern. The command string is extracted from `interrupt_info["action_requests"]`.
-
-#### .env Configuration
-
-```bash
-# Human-in-the-loop approvals (all default to true — set false to disable)
-REQUIRE_APPROVAL_GIT_COMMIT=true
-REQUIRE_APPROVAL_GIT_BRANCH=true
-REQUIRE_APPROVAL_GIT_STASH=true
-REQUIRE_APPROVAL_EDIT=true
-REQUIRE_APPROVAL_EXECUTE=true
-```
-
-Setting any to `false` lets that tool run autonomously. Useful for trusted CI environments where you want fully automated fixes.
+In cloud deployments, the process may restart between user sessions. Ensure:
+- All session state is stored in SQLite (already done via LangGraph checkpointer + Chainlit data layer)
+- `InMemoryStore` (used for long-term agent memory) is acceptable for v3 — document that it resets on restart
+- The `_checkpointer` global is initialised lazily on first use (already done)
+- No hardcoded absolute paths — all paths derived from `__file__` or env vars (audit and fix any violations)
 
 ---
 
-### 10. Out of Scope for v2
+### 3. FastAPI Mounting — Integration Guide
 
-- `git_push` / `git_pull` / `git_clone`
-- Multi-user / multi-tenant
-- IDE plugin
+**Goal:** Provide a clear, tested guide for mounting Dev Companion inside another FastAPI application.
+
+#### 3.1 How It Works Today
+
+`app.py` already demonstrates the mounting pattern:
+
+```python
+from fastapi import FastAPI
+from chainlit.utils import mount_chainlit
+from dashboard.api import dashboard_app
+
+app = FastAPI()
+
+# Mount dashboard routes
+for route in dashboard_app.routes:
+    app.routes.append(route)
+
+# Mount Chainlit UI at root
+mount_chainlit(app=app, target="reviewer_ui.py", path="/")
+```
+
+This works because `mount_chainlit` uses Starlette's sub-application mounting. The Chainlit app handles WebSocket connections and HTTP at the specified path prefix.
+
+#### 3.2 Mounting at a Sub-Path
+
+To mount Dev Companion inside a host FastAPI app at `/reviewer` instead of `/`:
+
+```python
+# host_app.py (the other FastAPI application)
+from fastapi import FastAPI
+from chainlit.utils import mount_chainlit
+from code_reviewer.dashboard.api import dashboard_app
+
+host_app = FastAPI(title="My Platform")
+
+# Your existing routes
+@host_app.get("/api/v1/status")
+async def status():
+    return {"ok": True}
+
+# Mount Dev Companion dashboard at /reviewer/dashboard
+for route in dashboard_app.routes:
+    # Prefix all dashboard routes
+    route.path = "/reviewer" + route.path
+    host_app.routes.append(route)
+
+# Mount Chainlit UI at /reviewer
+mount_chainlit(app=host_app, target="path/to/reviewer_ui.py", path="/reviewer")
+```
+
+**Important:** The `path` argument to `mount_chainlit` must match the prefix used for dashboard routes, otherwise the dashboard's API calls (which are relative to `/dashboard/api/...`) will 404.
+
+#### 3.3 Document: `MOUNTING.md`
+
+Create a `MOUNTING.md` file at the project root with:
+
+1. **Prerequisites** — what the host app needs (FastAPI ≥ 0.100, same Python process)
+2. **Quick start** — minimal working example (mount at `/reviewer`)
+3. **Path configuration** — how to set `APP_BASE_URL` so dashboard links work
+4. **Database isolation** — how to point Dev Companion at a different `DB_PATH` when running alongside other apps
+5. **Authentication** — how Chainlit's password auth interacts with the host app's auth
+6. **Static files** — the dashboard's static files are served from `dashboard/static/` — ensure the path is correct relative to the host app's working directory
+7. **Lifespan events** — how to merge Dev Companion's lifespan with the host app's lifespan
+8. **Known limitations** — Chainlit WebSocket path conflicts, single-process requirement
+
+#### 3.4 Lifespan Merging
+
+The current `app.py` lifespan closes the SQLite checkpointer connection on shutdown. When mounting inside a host app, this lifespan must be merged:
+
+```python
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+
+@asynccontextmanager
+async def merged_lifespan(app: FastAPI):
+    # Host app startup
+    yield
+    # Host app shutdown
+    # Dev Companion cleanup
+    try:
+        import reviewer_ui
+        if reviewer_ui._checkpointer_conn is not None:
+            await reviewer_ui._checkpointer_conn.close()
+    except Exception:
+        pass
+
+host_app = FastAPI(lifespan=merged_lifespan)
+```
+
+Document this pattern in `MOUNTING.md`.
+
+---
+
+### 4. Onboarding UX Improvements
+
+These changes improve the first-run experience, especially in cloud where users arrive with no local context.
+
+#### 4.1 Welcome Message
+
+Replace the bare `AskUserMessage` with a rich welcome card shown before the URL prompt:
+
+```
+🔍 Dev Companion — AI Code Reviewer
+
+I'll review your codebase and find bugs, security issues, and code quality problems.
+
+To get started, I need:
+  1. Your repository URL (HTTPS)
+  2. A Personal Access Token with read access
+
+Your PAT is used only to clone the repo and is never stored.
+```
+
+#### 4.2 PAT Guidance
+
+After asking for the PAT, show provider-specific guidance on how to create one:
+
+| Detected provider | Link shown |
+|-------------------|------------|
+| github.com | https://github.com/settings/tokens |
+| gitlab.com | https://gitlab.com/-/profile/personal_access_tokens |
+| bitbucket.org | https://bitbucket.org/account/settings/app-passwords |
+| dev.azure.com | https://dev.azure.com → User Settings → Personal Access Tokens |
+
+Detect the provider from the URL entered in step 1.
+
+#### 4.3 Clone Progress
+
+Show a progress message while cloning:
+
+```
+⏳ Cloning https://github.com/org/repo...
+✅ Cloned successfully (247 files, 3.2 MB)
+⚙️ Initialising review agent...
+✅ Ready to review repo
+```
+
+Show file count and size after clone using `os.walk`.
+
+---
+
+### 5. Security Hardening for Cloud
+
+Running in a shared cloud environment requires additional security measures.
+
+#### 5.1 PAT Handling
+
+- PAT must be passed directly to `git clone` via the URL — never written to disk, never logged
+- After clone, immediately overwrite the PAT variable: `pat = ""`
+- The `PromptDebugCallback` in `llm_factory.py` must not print any message containing `GIT_TOKEN`, `GIT_PASSWORD`, or the PAT value
+- Add a check: if `DEBUG_PRINT_PROMPT=true` in production (detected by `APP_BASE_URL` not being localhost), log a warning
+
+#### 5.2 Workspace Isolation
+
+Each session clones into its own directory (`workspaces/<repo-name>-<uuid>/`). This ensures:
+- Sessions cannot read each other's code
+- A compromised session cannot affect other sessions' workspaces
+- Cleanup is per-session, not global
+
+The `LocalShellBackend` in `review_agent.py` is already scoped to `parent_dir` of the workspace — verify this still holds with the new clone-based path structure.
+
+#### 5.3 Chainlit Auth in Cloud
+
+The current auth uses a single hardcoded username/password from `.env`. For cloud:
+- Keep the existing `CHAINLIT_USER` / `CHAINLIT_PASSWORD` env vars
+- Document that these should be changed from the defaults (`admin`/`admin`) before deployment
+- Add a startup warning if the defaults are detected: `logger.warning("SECURITY: Default Chainlit credentials in use. Change CHAINLIT_USER and CHAINLIT_PASSWORD.")`
+
+#### 5.4 Rate Limiting (Optional, v3.1)
+
+In a public cloud deployment, the clone endpoint could be abused. Consider:
+- Limit to N active sessions per IP (configurable via `MAX_SESSIONS_PER_IP`)
+- Limit total concurrent clones (configurable via `MAX_CONCURRENT_CLONES`)
+- This is optional for v3 but document the approach
+
+---
+
+### 6. Configuration Changes
+
+#### 6.1 New Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AGENT_DATA_DIR` | `./agent_data` | Path to SQLite DB directory — mount Azure Files share here |
+| `WORKSPACE_BASE_DIR` | `./workspaces` | Base directory for cloned repos (ephemeral, not mounted) |
+| `CLEANUP_WORKSPACE_ON_EXIT` | `true` | Delete workspace when session ends |
+| `APP_BASE_URL` | `http://localhost:8001` | Public URL — used in dashboard links (set to Azure Container Apps URL) |
+| `MAX_CLONE_SIZE_MB` | `500` | Reject repos larger than this (0 = no limit) |
+| `GIT_CLONE_DEPTH` | `1` | Shallow clone depth (1 = latest commit only, faster) |
+
+#### 6.2 Updated `.env.example`
+
+The `.env.example` must be updated to include all new variables with comments explaining cloud vs local usage.
+
+#### 6.3 Remove `GIT_AUTH_TYPE` Complexity
+
+The existing `GIT_AUTH_TYPE` env var supports `none`, `https_token`, `https_basic`, `ssh`. In the new flow, auth is always `https_token` (PAT provided at runtime by the user). The static env-var auth is still useful for local development where the workspace is pre-existing.
+
+Keep both flows:
+- **Cloud flow:** PAT provided at chat start → used for clone → cleared after clone
+- **Local flow:** Workspace folder name provided → no clone → existing `GIT_AUTH_TYPE` env vars used for push/pull if needed
+
+The UI detects which flow to use: if `WORKSPACE_BASE_DIR` is set and writable, offer the clone flow. Otherwise fall back to the folder-name flow.
+
+---
+
+### 7. Implementation Plan
+
+#### Phase 1 — Cloud Infrastructure (do first)
+1. Add `git_clone()` to `tools/git_tools.py`
+2. Update `reviewer_ui.py` `on_chat_start` to run the two-step onboarding (URL + PAT)
+3. Add workspace cleanup on session end
+4. Add `WORKSPACE_BASE_DIR`, `APP_BASE_URL`, `CLEANUP_WORKSPACE_ON_EXIT` env vars
+5. Replace hardcoded `localhost:8001` URLs with `APP_BASE_URL`
+6. Add `/health` endpoint to `app.py`
+7. Add startup warning for default credentials
+
+#### Phase 2 — Docker + Deployment
+1. Write `Dockerfile`
+2. Write `docker-compose.yml`
+3. Update `.env.example` with all new variables
+4. Test full flow: `docker build` → `docker run` → clone → review
+
+#### Phase 3 — Mounting Guide
+1. Write `MOUNTING.md` covering all scenarios in §3
+2. Test mounting inside a minimal host FastAPI app
+3. Verify dashboard routes work at sub-path
+4. Verify Chainlit WebSocket works at sub-path
+
+#### Phase 4 — Security Hardening
+1. PAT clearing after clone
+2. Startup warning for default credentials
+3. Audit all log statements for accidental secret leakage
+4. Verify workspace isolation (each session in its own directory)
+
+---
+
+### 8. Out of Scope for v3
+
+- Multi-user / multi-tenant auth (beyond single shared password)
+- PostgreSQL migration (SQLite is sufficient for single-instance cloud)
 - PR/MR creation on GitHub/GitLab
-
-
-- DeepAgent reviews a codebase and calls `record_finding` for each issue
-- Findings stored in SQLite with criticality / category / file / line
-- Chainlit UI shows inline finding cards during review
-- Dashboard: Findings tab (table + donut + bar), Observability tab (tokens, tools), Settings tab
-- Session summary at end of review
+- SSH key auth for cloud clone (HTTPS PAT is the standard cloud pattern)
+- Rate limiting (v3.1)
+- Kubernetes Helm chart (v3.1)
 
 ---
 
-## v2 Requirements
+### 9. Files to Create / Modify
+
+| File | Action | Description |
+|------|--------|-------------|
+| `tools/git_tools.py` | Modify | Add `git_clone()` function |
+| `reviewer_ui.py` | Modify | Replace folder-name prompt with URL + PAT onboarding; add workspace cleanup |
+| `app.py` | Modify | Add `/health` endpoint; replace hardcoded URLs |
+| `dashboard/db.py` | Modify | Derive `DB_PATH` from `AGENT_DATA_DIR` env var instead of `__file__` |
+| `.env.example` | Modify | Add new cloud env vars |
+| `Dockerfile` | Create | Production container image |
+| `docker-compose.yml` | Create | Local dev + simple cloud deployment |
+| `MOUNTING.md` | Create | Guide for mounting inside another FastAPI app |
+| `llm_factory.py` | Modify | Guard `PromptDebugCallback` against logging secrets |
 
 ---
 
-### 1. Enhanced Observability Dashboard
+### 10. Key Design Decisions
 
-**Status:** Partially built — needs more depth
+**Why HTTPS PAT only (not SSH) for cloud clone?**  
+SSH requires key management (mounting secrets, known_hosts setup). HTTPS PAT is simpler, works everywhere, and is the standard for CI/CD systems. Users already have PATs for GitHub Actions, GitLab CI, etc.
 
-#### 1.1 Additional Metric Cards
-Add to the Observability tab:
+**Why shallow clone (`--depth 1`) by default?**  
+Full history is not needed for code review. Shallow clone is 10–100× faster for large repos and uses far less disk space. The `git_log` tool still works (shows the single commit). Set `GIT_CLONE_DEPTH=0` to disable if full history is needed.
 
-| Metric | Source |
-|--------|--------|
-| Avg tokens per review session | `llm_calls` grouped by `thread_id` |
-| Total review sessions | distinct `thread_id` count |
-| Avg findings per session | `review_findings` / sessions |
-| Most expensive session (tokens) | max `total_tokens` per `thread_id` |
+**Why delete the workspace on session end?**  
+Cloud storage is ephemeral and expensive. Keeping cloned repos around serves no purpose after the session ends — the user can re-clone. This also prevents sensitive code from accumulating on the server.
 
-#### 1.2 Additional Charts
-All charts use Chart.js, dark theme consistent with existing style.
+**Why keep SQLite instead of moving to a cloud database?**  
+SQLite with a mounted volume works perfectly for single-instance deployments (which covers 95% of use cases). The abstraction in `dashboard/db.py` makes migration straightforward if needed. Premature optimisation.
 
-| Chart | Type | Data |
-|-------|------|------|
-| Prompt vs Completion token split (stacked bar over time) | Stacked bar | `llm_calls` by date |
-| Model distribution (which models used) | Doughnut | `llm_calls` grouped by `model` |
-| Tool call success vs failure rate | Grouped bar | `tool_invocations` by `tool_name` |
-| Findings trend over time | Line | `review_findings` by date |
-| Top 10 files by finding count | Horizontal bar | `review_findings` grouped by `file_path` |
-| Findings heatmap by category × criticality | Table heatmap (CSS grid, no lib needed) | `review_findings` cross-tab |
-
-#### 1.3 Session Detail Drilldown
-Clicking a session in the Sessions list opens a detail panel showing:
-- All LLM calls for that session (timestamp, model, tokens)
-- All tool invocations (tool name, duration, status)
-- All findings for that session (same table as Findings tab but scoped)
-- Total cost estimate (tokens × configurable $/1k rate)
-
-**New API endpoints needed:**
-```
-GET /dashboard/api/telemetry/sessions/{thread_id}   ← already exists, extend it
-GET /dashboard/api/telemetry/models                 ← already exists
-GET /dashboard/api/findings/by-file                 ← new: findings grouped by file_path
-GET /dashboard/api/findings/trend                   ← new: findings count by date
-GET /dashboard/api/findings/heatmap                 ← new: category × criticality matrix
-```
-
----
-
-### 2. Report Export (HTML + XLSX)
-
-**Status:** Not built
-
-#### 2.1 HTML Report
-A self-contained single-file HTML report that can be opened offline.
-
-Content:
-- Header: project name, review date, reviewer (model name), total findings
-- Executive summary: findings by criticality (coloured cards), code health score
-- Findings table: sortable, filterable, same columns as dashboard
-- Per-file breakdown: accordion sections per file with its findings
-- Appendix: full description + suggestion for each finding
-
-**Implementation:**
-- New endpoint: `GET /dashboard/api/reports/html?thread_id=<id>`
-- Returns `Content-Disposition: attachment; filename="review_<date>.html"`
-- Generated server-side using Python string templates (no Jinja2 dependency needed)
-- Inline CSS + vanilla JS for sorting/filtering (no external deps, fully offline)
-
-#### 2.2 XLSX Report
-Excel workbook with multiple sheets.
-
-| Sheet | Content |
-|-------|---------|
-| Summary | Counts by criticality and category, code health score |
-| All Findings | Full findings table (id, file, line, criticality, category, title, description, suggestion) |
-| By File | Findings grouped by file with subtotals |
-| Observability | Token usage, LLM calls, tool invocations for the session |
-
-**Implementation:**
-- Dependency: `openpyxl` (pure Python, no C extensions)
-- New endpoint: `GET /dashboard/api/reports/xlsx?thread_id=<id>`
-- Returns `Content-Disposition: attachment; filename="review_<date>.xlsx"`
-- Conditional formatting: criticality column cells coloured (red/orange/yellow/blue/grey)
-
-**Dashboard UI changes:**
-- Add "Export HTML" and "Export XLSX" buttons to the Findings tab header
-- Both buttons pass the currently selected `thread_id` filter (or all if none selected)
-
----
-
-### 3. Post-Review Fix Workflow
-
-**Status:** Not built
-
-After a review completes, the agent sends a structured follow-up message:
-
-```
-Review complete. Found 12 issues (2 critical, 4 high, 6 medium).
-
-Would you like me to fix any of these?
-
-Options:
-  • Fix everything — I'll address all findings in priority order
-  • Fix by criticality — e.g. "fix all critical and high"
-  • Fix a specific finding — share the finding ID (e.g. #3) or describe it
-  • Fix a specific file — e.g. "fix everything in auth.py"
-
-Estimated tokens per fix:
-  #1 [CRITICAL] Hardcoded secret in config.py — ~800 tokens
-  #2 [CRITICAL] SQL injection in user_query() — ~1,200 tokens
-  #3 [HIGH] Missing input validation in api/routes.py — ~600 tokens
-  ...
-```
-
-#### 3.1 Token Estimate per Finding
-Estimate = `(file_size_in_chars / 4) * 1.5 + 300` (read file + edit + verify overhead).
-This is a rough estimate shown to the user before they commit to a fix.
-
-The estimate is computed at review-end time by reading file sizes from the workspace.
-
-#### 3.2 Fix Modes
-| User says | Agent behaviour |
-|-----------|----------------|
-| "fix everything" | Fixes all findings in order: critical → high → medium → low |
-| "fix #3" or "fix finding 3" | Fixes only that finding (matched by ID from the session) |
-| "fix all critical" | Fixes all findings with `criticality = critical` |
-| "fix auth.py" | Fixes all findings in that file |
-| "fix #3 and #7" | Fixes those two findings |
-
-#### 3.3 Finding IDs
-Each finding gets a sequential ID within the session (1, 2, 3...) shown in the post-review message and in the inline finding cards during review.
-
-**UI change:** Finding cards in chat show `#<id>` prefix: `🔴 #1 [CRITICAL] config.py:12 — Hardcoded secret`
-
----
-
-### 4. Git Integration
-
-**Status:** Not built
-
-#### 4.1 Git Tools Available to the Agent
-Reuse the same GitPython-based tools from `ai-intern/tools/git_tools.py` — copy them into `code-reviewer/tools/git_tools.py` (standalone, no import from ai-intern).
-
-Tools included:
-- `git_status` — show staged/modified/untracked files
-- `git_diff` — unified diff of working tree or staged changes
-- `git_log` — recent commit history
-- `git_blame` — line-by-line authorship
-- `git_create_branch` — branch before making fixes
-- `git_commit` — commit fixes with AI-generated message
-- `git_stash` — stash before switching context
-
-Tools NOT included (out of scope for reviewer):
-- `git_push`, `git_pull`, `git_clone` — reviewer is read-only by default
-
-#### 4.2 Review Scope Selection
-When the user starts a new review session on a repo that has been reviewed before, the agent checks if the repo is a git repo and asks:
-
-```
-I found a previous review of this repo from <date> at commit <short_hash>.
-
-How would you like to proceed?
-  A) Review only changes since last review (git diff <last_commit>..HEAD)
-  B) Full review of the entire codebase
-```
-
-**Implementation:**
-- Store `last_reviewed_commit` in `agent_config` or a new `review_sessions` table keyed by `workspace_path`
-- On session start, check if workspace is a git repo and if a previous commit hash is stored
-- If yes, present the choice via `cl.AskActionMessage`
-- If user picks A, pass the diff output to the agent as additional context and restrict file scope
-
-#### 4.3 Code Change Diff Screen with Undo
-When the agent makes a fix (edits a file), the Chainlit UI shows a diff viewer (same `DiffViewer` custom element as ai-intern) with an **Undo** button.
-
-Clicking Undo:
-1. Calls `git_stash pop` if the fix was stashed, OR
-2. Restores the file to its pre-fix content (stored in session memory before the edit)
-3. Removes the finding from the "fixed" list
-4. Shows a confirmation message
-
-**Implementation:**
-- Before any `edit_file` call during fix mode, store `{file_path: original_content}` in session state
-- After `edit_file`, render `DiffViewer` with an Undo action button
-- Undo handler restores from session state and calls `write_file` with original content
-
-#### 4.4 Review Sessions Table
-New DB table to track review history per workspace:
-
-```sql
-CREATE TABLE IF NOT EXISTS review_sessions (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    thread_id   TEXT NOT NULL,
-    workspace   TEXT NOT NULL,
-    timestamp   TEXT NOT NULL,
-    commit_hash TEXT,          -- git HEAD at time of review (null if not a git repo)
-    scope       TEXT,          -- 'full' or 'diff'
-    total_findings INTEGER,
-    model       TEXT
-);
-```
-
-This enables the "review only changes since last review" feature.
-
----
-
-### 5. New DB Schema Changes
-
-Summary of all new/modified tables:
-
-```sql
--- Existing: review_findings — add finding_id (sequential per thread)
-ALTER TABLE review_findings ADD COLUMN finding_id INTEGER;
-ALTER TABLE review_findings ADD COLUMN estimated_fix_tokens INTEGER;
-ALTER TABLE review_findings ADD COLUMN status TEXT DEFAULT 'open';  -- open, fixed, dismissed
-
--- New: review_sessions
-CREATE TABLE IF NOT EXISTS review_sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    thread_id TEXT NOT NULL,
-    workspace TEXT NOT NULL,
-    timestamp TEXT NOT NULL,
-    commit_hash TEXT,
-    scope TEXT,
-    total_findings INTEGER,
-    model TEXT
-);
-```
-
----
-
-### 6. New API Endpoints Summary
-
-| Method | Path | Description |
-|--------|------|-------------|
-| GET | `/dashboard/api/findings/by-file` | Findings grouped by file_path with counts |
-| GET | `/dashboard/api/findings/trend` | Findings count by date |
-| GET | `/dashboard/api/findings/heatmap` | category × criticality matrix |
-| GET | `/dashboard/api/reports/html` | Download HTML report (query: `thread_id`) |
-| GET | `/dashboard/api/reports/xlsx` | Download XLSX report (query: `thread_id`) |
-| GET | `/dashboard/api/sessions` | Review sessions list (workspace history) |
-| PATCH | `/dashboard/api/findings/{id}/status` | Mark finding as fixed/dismissed |
-
----
-
-### 7. New Dependencies
-
-| Package | Purpose | Already in requirements? |
-|---------|---------|--------------------------|
-| `openpyxl>=3.1.0` | XLSX report generation | No — add |
-| `gitpython>=3.1.40` | Git integration tools | No — add |
-
-No other new dependencies. HTML report uses Python string templates only.
-
----
-
-### 8. Implementation Priority
-
-| Priority | Feature | Effort |
-|----------|---------|--------|
-| 1 — High | Enhanced observability (§1) | Medium — mostly frontend charts + 3 new API endpoints |
-| 2 — High | HTML + XLSX report export (§2) | Medium — server-side generation, no new deps except openpyxl |
-| 3 — High | Post-review fix workflow + token estimates (§3) | Medium — agent prompt changes + UI follow-up message |
-| 4 — Medium | Git tools integration (§4.1) | Low — copy from ai-intern, wire into agent |
-| 5 — Medium | Review scope selection (§4.2) | Medium — new DB table + session start logic |
-| 6 — Medium | Diff screen with Undo (§4.3) | Medium — reuse DiffViewer element + undo handler |
-
----
-
-### 9. Out of Scope for v2
-
-- `git_push` / `git_pull` / `git_clone` — reviewer is read-only
-- Multi-user / multi-tenant support
-- Real-time collaborative review
-- IDE plugin / VS Code extension
-- LLM-based code health scoring (current score is heuristic)
-- PR/MR creation on GitHub/GitLab
+**Why not store the PAT in the database for re-use?**  
+Security. A stored PAT is a liability — it can be leaked via DB export, logs, or a compromised server. The user provides it fresh each session. This is the correct pattern for a code review tool that handles potentially sensitive repositories.

@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  code-reviewer:
+    build: .
+    ports:
+      - "8001:8001"
+    volumes:
+      # Mount Azure Files share (or local dir for dev) to persist SQLite databases.
+      # In Azure Container Apps, configure the Azure Files volume mount at /app/agent_data
+      # and remove this volumes entry — the mount is handled by the container app config.
+      - ${AGENT_DATA_MOUNT:-./agent_data}:/app/agent_data
+    env_file:
+      - .env
+    environment:
+      # Override these in .env or via container app environment variables
+      - AGENT_DATA_DIR=/app/agent_data
+      - WORKSPACE_BASE_DIR=/app/workspaces
+      - CLEANUP_WORKSPACE_ON_EXIT=true
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+    restart: unless-stopped

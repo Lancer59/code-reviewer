@@ -9,13 +9,19 @@ import logging
 import os
 import aiosqlite
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agent_data", "dashboard.db")
+from config import cfg
+
+_AGENT_DATA_DIR = cfg(
+    "AGENT_DATA_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "agent_data"),
+)
+DB_PATH = os.path.join(_AGENT_DATA_DIR, "dashboard.db")
 logger = logging.getLogger(__name__)
 
 DEFAULT_SYSTEM_PROMPT = """You are an expert code reviewer. Review the target repository and record all findings using record_finding."""
 DEFAULT_ITERATION_LIMIT = 80
 DEFAULT_LLM_PROVIDER = "azure"
-DEFAULT_MODEL_NAME = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
+DEFAULT_MODEL_NAME = cfg("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
 
 
 async def init_db() -> None:
