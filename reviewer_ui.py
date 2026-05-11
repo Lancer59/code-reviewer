@@ -211,6 +211,8 @@ async def start():
     # Read PAT from session immediately — before any awaits that might lose context
     git_pat = cl.user_session.get("git_pat", "")
     git_repo_url = cl.user_session.get("git_repo_url", "")
+    # Direct stdout print so we can see this in server logs regardless of log level
+    print(f"[DEBUG start()] git_pat length={len(git_pat)} git_repo_url={git_repo_url[:40] if git_repo_url else 'EMPTY'}", flush=True)
     await _init_agent_session(workspace, git_pat=git_pat, git_repo_url=git_repo_url)
 
 
@@ -285,6 +287,9 @@ async def _onboard_cloud() -> str | None:
         if pat:
             cl.user_session.set("git_pat", pat)
             cl.user_session.set("git_repo_url", repo_url)
+            print(f"[DEBUG _onboard_cloud] PAT stored in session, length={len(pat)}", flush=True)
+        else:
+            print("[DEBUG _onboard_cloud] No PAT (public repo / skip)", flush=True)
     except ValueError as e:
         await cl.Message(content=f"❌ {e}").send()
         return None
