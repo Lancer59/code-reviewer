@@ -1,6 +1,7 @@
 """Chainlit UI for Dev Companion — rich activity display, finding cards, approvals."""
 
 import chainlit as cl
+import json
 import os
 import asyncio
 import logging
@@ -573,8 +574,11 @@ async def main(message: cl.Message):
                                     ))
                                     diff_text = "".join(diff_lines[:120])
                                     if diff_text:
+                                        added = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+                                        removed = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+                                        summary = f"  `+{added}` `−{removed}`"
                                         await cl.Message(
-                                            content=f"✏️ **Changed `{display_fp}`**\n```diff\n{diff_text}\n```",
+                                            content=f"✏️ **Changed `{display_fp}`**{summary}\n```diff\n{diff_text}\n```",
                                             actions=[cl.Action(
                                                 name="undo",
                                                 payload={"file": fp, "type": "edit"},
@@ -751,52 +755,89 @@ async def main(message: cl.Message):
                     try:
                         if isinstance(interrupt_info, dict) and "action_requests" in interrupt_info:
                             reqs = interrupt_info["action_requests"]
-                            cmd_str = "\n".join([
-                                f"{r.get('name')}: {r.get('args', {}).get('command', r.get('args', ''))}"
-                                for r in reqs
-                            ])
 
-                            # Capture pre-edit snapshot from interrupt args
-                            # (on_tool_start never fires before an interrupt)
-                            for req in reqs:
-                                req_name = req.get("name", "")
-                                req_args = req.get("args", {})
+                            # Build approval content — rich diff for edit_file, plain for others
+                            approval_content_parts = []
+                            for r in reqs:
+                                req_name = r.get("name", "")
+                                req_args = r.get("args", {}) if isinstance(r.get("args"), dict) else {}
+
+                                if req_name == "edit_file":
+                                    fp = (req_args.get("file_path") or req_args.get("path")
+                                          or req_args.get("target_file") or req_args.get("filename", ""))
+                                    old_str = req_args.get("old_string", req_args.get("old_str", ""))
+                                    new_str = req_args.get("new_string", req_args.get("new_str", ""))
+
+                                    if old_str and new_str:
+                                        import difflib
+                                        diff_lines = list(difflib.unified_diff(
+                                            old_str.splitlines(keepends=True),
+                                            new_str.splitlines(keepends=True),
+                                            fromfile=f"before",
+                                            tofile=f"after",
+                                            n=3,
+                                        ))
+                                        diff_text = "".join(diff_lines[:80])
+                                        approval_content_parts.append(
+                                            f"✏️ **Edit `{fp}`**\n```diff\n{diff_text}\n```"
+                                        )
+                                    else:
+                                        approval_content_parts.append(f"✏️ **Edit `{fp}`**")
+
+                                elif req_name == "write_file":
+                                    fp = (req_args.get("file_path") or req_args.get("path")
+                                          or req_args.get("target_file") or req_args.get("filename", ""))
+                                    content_preview = str(req_args.get("content", ""))[:400]
+                                    added_lines = content_preview.splitlines(keepends=True)[:40]
+                                    diff_text = f"--- /dev/null\n+++ b/{fp}\n"
+                                    diff_text += "".join(f"+{line}" for line in added_lines)
+                                    approval_content_parts.append(
+                                        f"📝 **Create `{fp}`**\n```diff\n{diff_text}\n```"
+                                    )
+
+                                elif req_name in ("git_commit", "git_create_branch", "git_stash", "git_push"):
+                                    approval_content_parts.append(
+                                        f"🔧 **`{req_name}`**\n```json\n{json.dumps(req_args, indent=2)}\n```"
+                                    )
+
+                                elif req_name == "execute":
+                                    cmd = req_args.get("command", str(req_args))
+                                    approval_content_parts.append(f"⚡ **Execute**\n```bash\n{cmd}\n```")
+
+                                else:
+                                    approval_content_parts.append(
+                                        f"🔧 **`{req_name}`**\n```\n{str(req_args)[:300]}\n```"
+                                    )
+
+                                # Capture pre-edit snapshot (for undo after approval)
                                 if req_name in ("edit_file", "write_file") and isinstance(req_args, dict):
-                                    fp = (
-                                        req_args.get("file_path")
-                                        or req_args.get("path")
-                                        or req_args.get("target_file")
-                                        or req_args.get("filename", "")
-                                    )
-                                    logger.info(
-                                        "[DIFF-DEBUG] Interrupt snapshot for %s  fp=%r  keys=%s",
-                                        req_name, fp, list(req_args.keys()),
-                                    )
-                                    # Save tool input for on_tool_end fallback
+                                    fp_snap = (req_args.get("file_path") or req_args.get("path")
+                                               or req_args.get("target_file") or req_args.get("filename", ""))
                                     cl.user_session.set("_last_edit_input", req_args)
-
-                                    if fp:
+                                    if fp_snap:
                                         workspace_path = cl.user_session.get("workspace", "")
-                                        full_fp = fp if os.path.isabs(fp) else os.path.join(workspace_path, fp)
+                                        full_fp = fp_snap if os.path.isabs(fp_snap) else os.path.join(workspace_path, fp_snap)
                                         undo_store = cl.user_session.get("undo_store") or {}
                                         if req_name == "edit_file":
                                             try:
                                                 with open(full_fp, "r", encoding="utf-8", errors="replace") as fh:
                                                     original = fh.read()
-                                                undo_store[fp] = {"type": "edit", "original": original}
+                                                undo_store[fp_snap] = {"type": "edit", "original": original}
                                             except Exception:
                                                 pass
-                                        else:  # write_file
+                                        else:
                                             if os.path.exists(full_fp):
                                                 try:
                                                     with open(full_fp, "r", encoding="utf-8", errors="replace") as fh:
                                                         original = fh.read()
-                                                    undo_store[fp] = {"type": "edit", "original": original}
+                                                    undo_store[fp_snap] = {"type": "edit", "original": original}
                                                 except Exception:
                                                     pass
                                             else:
-                                                undo_store[fp] = {"type": "new_file"}
+                                                undo_store[fp_snap] = {"type": "new_file"}
                                         cl.user_session.set("undo_store", undo_store)
+
+                            cmd_str = "\n\n".join(approval_content_parts) if approval_content_parts else str(interrupt_info)
                         else:
                             cmd_str = str(interrupt_info)
                     except Exception:
@@ -805,7 +846,7 @@ async def main(message: cl.Message):
                     res = await cl.AskActionMessage(
                         content=(
                             f"⚠️ **Approval Required**\n\n"
-                            f"```\n{cmd_str}\n```\n\n"
+                            f"{cmd_str}\n\n"
                             f"Approve or reject this operation?"
                         ),
                         actions=[
