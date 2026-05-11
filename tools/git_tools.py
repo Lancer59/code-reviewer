@@ -349,13 +349,22 @@ async def git_push(repo_path: str, remote: str = "origin", branch: str = "") -> 
     Uses the PAT provided during onboarding — injected directly into the push URL.
     Requires a PAT — will NOT fall back to system credential manager for safety.
     """
+    # Try os.environ first (fastest path), then fall back to DB lookup
+    pat = os.environ.get("_SESSION_GIT_PAT", "").strip()
+    if not pat:
+        thread_id = os.environ.get("_SESSION_GIT_THREAD_ID", "")
+        if thread_id:
+            try:
+                from dashboard.db import load_pat as _load_pat
+                pat = await _load_pat(thread_id)
+                if pat:
+                    logger.info("git_push: PAT loaded from DB for thread %s", thread_id[:8])
+            except Exception as e:
+                logger.warning("git_push: DB PAT lookup failed: %s", e)
+
     def _run():
         repo = _safe_repo(repo_path)
         target_branch = branch.strip() or repo.active_branch.name
-        # Read directly from os.environ — this is a session-scoped runtime key,
-        # not a config.json key, so bypass cfg() to avoid any stale module cache
-        pat = os.environ.get("_SESSION_GIT_PAT", "").strip()
-
         if not repo.remotes:
             return "Error: No remotes configured on this repository."
         try:

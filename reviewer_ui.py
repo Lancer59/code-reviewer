@@ -28,6 +28,7 @@ from dashboard.db import (
     record_tool_invocation_end, record_finding as db_record_finding,
     record_review_session, get_last_review_session,
     update_finding_status as db_update_finding_status,
+    save_pat, load_pat, delete_pat,
 )
 from tools.git_tools import git_clone, cleanup_workspace
 
@@ -286,7 +287,6 @@ async def _onboard_cloud() -> str | None:
         return None
     finally:
         pat = ""  # clear local variable
-
     try:
         file_count = sum(len(files) for _, _, files in os.walk(workspace))
         total_bytes = sum(
@@ -343,6 +343,20 @@ async def _init_agent_session(workspace: str) -> None:
         cl.user_session.set("finding_count", 0)
         cl.user_session.set("review_start_time", None)
         cl.user_session.set("review_scope", "full")
+
+        # Save PAT encrypted in DB keyed by thread_id so git_push can retrieve it
+        # regardless of os.environ state (survives subagent context switches)
+        git_pat = cl.user_session.get("git_pat", "")
+        repo_url_for_pat = cl.user_session.get("git_repo_url", cl.user_session.get("repo_url", ""))
+        if git_pat:
+            await save_pat(thread_id, git_pat, repo_url_for_pat)
+            logger.info("PAT saved to DB for thread %s", thread_id[:8])
+        # Also expose via os.environ as belt-and-suspenders
+        if git_pat:
+            os.environ["_SESSION_GIT_PAT"] = git_pat
+            os.environ["_SESSION_GIT_THREAD_ID"] = thread_id
+        else:
+            logger.warning("No PAT in session — git_push will require re-clone with a PAT")
 
         from chainlit.data import get_data_layer as _dl
         dl = _dl()
@@ -485,9 +499,14 @@ async def on_chat_resume(thread):
 
 @cl.on_chat_end
 async def on_chat_end():
-    """Clean up cloned workspace and clear PAT from environment."""
+    """Clean up cloned workspace and clear PAT from environment and DB."""
     os.environ.pop("_SESSION_GIT_PAT", None)
     os.environ.pop("_SESSION_GIT_REPO_URL", None)
+    os.environ.pop("_SESSION_GIT_THREAD_ID", None)
+    # Delete encrypted PAT from DB
+    thread_id = cl.user_session.get("thread_id")
+    if thread_id:
+        await delete_pat(thread_id)
     if not cfg_bool("CLEANUP_WORKSPACE_ON_EXIT", True):
         return
     cloned = cl.user_session.get("cloned_workspace")

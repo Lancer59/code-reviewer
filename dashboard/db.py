@@ -216,3 +216,64 @@ async def update_finding_status(finding_id: int, status: str):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("UPDATE review_findings SET status=? WHERE id=?", (status, finding_id))
         await db.commit()
+
+
+# ---------------------------------------------------------------------------
+# PAT storage — encrypted at rest, keyed by thread_id
+# ---------------------------------------------------------------------------
+
+def _fernet():
+    """Return a Fernet instance keyed from CHAINLIT_AUTH_SECRET."""
+    from cryptography.fernet import Fernet
+    import base64, hashlib
+    secret = cfg("CHAINLIT_AUTH_SECRET", "dev-companion-default-secret-change-me")
+    # Derive a 32-byte key from the secret using SHA-256, then base64url-encode it
+    key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode()).digest())
+    return Fernet(key)
+
+
+async def save_pat(thread_id: str, pat: str, repo_url: str) -> None:
+    """Encrypt and store a PAT for the given thread. Safe to call with empty pat."""
+    if not pat:
+        return
+    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    token = _fernet().encrypt(pat.encode()).decode()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS session_pats (
+                thread_id TEXT PRIMARY KEY,
+                token TEXT NOT NULL,
+                repo_url TEXT,
+                created_at TEXT
+            )
+        """)
+        await db.execute(
+            "INSERT OR REPLACE INTO session_pats (thread_id, token, repo_url, created_at) VALUES (?,?,?,?)",
+            (thread_id, token, repo_url, datetime.datetime.utcnow().isoformat())
+        )
+        await db.commit()
+
+
+async def load_pat(thread_id: str) -> str:
+    """Retrieve and decrypt the PAT for the given thread. Returns '' if not found."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute(
+                "SELECT token FROM session_pats WHERE thread_id=?", (thread_id,)
+            ) as cur:
+                row = await cur.fetchone()
+        if row:
+            return _fernet().decrypt(row[0].encode()).decode()
+    except Exception as e:
+        logger.warning("load_pat failed for thread %s: %s", thread_id, e)
+    return ""
+
+
+async def delete_pat(thread_id: str) -> None:
+    """Delete the stored PAT for a thread (call on session end)."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM session_pats WHERE thread_id=?", (thread_id,))
+            await db.commit()
+    except Exception:
+        pass

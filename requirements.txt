@@ -10,3 +10,4 @@ aiosqlite
 SQLAlchemy
 openpyxl>=3.1.0
 gitpython>=3.1.40
+cryptography>=3.0
