@@ -344,8 +344,14 @@ async def _init_agent_session(workspace: str) -> None:
         from chainlit.data import get_data_layer as _dl
         dl = _dl()
         if dl:
+            # Use a human-readable thread name: "repo-name @ branch-or-date"
+            repo_url = cl.user_session.get("repo_url", "")
+            repo_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "") if repo_url else project_folder
+            import datetime as _dt
+            thread_name = f"{repo_name} — {_dt.datetime.now().strftime('%b %d %H:%M')}"
             await dl.update_thread(
                 thread_id=cl.context.session.thread_id,
+                name=thread_name,
                 metadata={"thread_id": thread_id, "workspace": workspace}
             )
 
