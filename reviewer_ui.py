@@ -208,7 +208,10 @@ async def start():
     workspace = await _onboard_cloud()
     if not workspace:
         return
-    await _init_agent_session(workspace)
+    # Read PAT from session immediately — before any awaits that might lose context
+    git_pat = cl.user_session.get("git_pat", "")
+    git_repo_url = cl.user_session.get("git_repo_url", "")
+    await _init_agent_session(workspace, git_pat=git_pat, git_repo_url=git_repo_url)
 
 
 async def _onboard_cloud() -> str | None:
@@ -306,19 +309,15 @@ async def _onboard_cloud() -> str | None:
     return workspace
 
 
-async def _init_agent_session(workspace: str) -> None:
+async def _init_agent_session(workspace: str, git_pat: str = "", git_repo_url: str = "") -> None:
     """Shared agent initialisation after onboarding."""
     project_folder = os.path.basename(workspace)
 
-    # Expose PAT to git_push tool via os.environ so cfg() can read it.
-    # Also log so we can diagnose if it's missing.
-    git_pat = cl.user_session.get("git_pat", "")
+    # Log PAT availability upfront
     if git_pat:
-        os.environ["_SESSION_GIT_PAT"] = git_pat
-        os.environ["_SESSION_GIT_REPO_URL"] = cl.user_session.get("git_repo_url", "")
-        logger.info("PAT set in os.environ for git_push (length=%d)", len(git_pat))
+        logger.info("_init_agent_session: PAT available (length=%d)", len(git_pat))
     else:
-        logger.warning("No PAT in session — git_push will fail if repo is private")
+        logger.warning("_init_agent_session: No PAT provided")
 
     try:
         msg = cl.Message(content="⚙️ Initialising review agent...")
@@ -346,17 +345,13 @@ async def _init_agent_session(workspace: str) -> None:
 
         # Save PAT encrypted in DB keyed by thread_id so git_push can retrieve it
         # regardless of os.environ state (survives subagent context switches)
-        git_pat = cl.user_session.get("git_pat", "")
-        repo_url_for_pat = cl.user_session.get("git_repo_url", cl.user_session.get("repo_url", ""))
         if git_pat:
-            await save_pat(thread_id, git_pat, repo_url_for_pat)
+            await save_pat(thread_id, git_pat, git_repo_url or cl.user_session.get("repo_url", ""))
             logger.info("PAT saved to DB for thread %s", thread_id[:8])
-        # Also expose via os.environ as belt-and-suspenders
-        if git_pat:
             os.environ["_SESSION_GIT_PAT"] = git_pat
             os.environ["_SESSION_GIT_THREAD_ID"] = thread_id
         else:
-            logger.warning("No PAT in session — git_push will require re-clone with a PAT")
+            logger.warning("No PAT — git_push will require re-clone with a PAT")
 
         from chainlit.data import get_data_layer as _dl
         dl = _dl()
