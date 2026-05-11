@@ -2,12 +2,13 @@
 Production entry point for Dev Companion.
 
 Run with:
-    uvicorn app:app --host 127.0.0.1 --port 8001
+    uvicorn app:app --host 0.0.0.0 --port 8001
 
 Development (Chainlit only):
     chainlit run reviewer_ui.py
 """
 
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from chainlit.utils import mount_chainlit
@@ -23,11 +24,17 @@ async def lifespan(app: FastAPI):
             await reviewer_ui._checkpointer_conn.close()
     except Exception:
         pass
-    import os
     os._exit(0)
 
 
 app = FastAPI(title="Dev Companion", lifespan=lifespan)
+
+
+@app.get("/health", tags=["ops"])
+async def health():
+    """Liveness probe for container orchestration (Docker, Kubernetes, Azure Container Apps)."""
+    return {"status": "ok", "version": "3.0"}
+
 
 for route in dashboard_app.routes:
     app.routes.append(route)

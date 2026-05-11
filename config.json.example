@@ -1,0 +1,40 @@
+{
+  "_comment": "Rename this file to config.json to use it. Values here override .env and environment variables.",
+
+  "AZURE_OPENAI_API_KEY": "",
+  "AZURE_OPENAI_ENDPOINT": "https://your-resource.openai.azure.com/",
+  "AZURE_OPENAI_API_VERSION": "2024-08-01-preview",
+  "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-4o",
+
+  "OPENAI_API_KEY": "",
+  "GOOGLE_API_KEY": "",
+  "OLLAMA_BASE_URL": "http://localhost:11434",
+
+  "CHAINLIT_AUTH_SECRET": "change-this-to-a-random-secret",
+  "CHAINLIT_USER": "admin",
+  "CHAINLIT_PASSWORD": "admin",
+
+  "ITERATION_LIMIT": 150,
+  "SUMMARIZATION_TOKEN_TRIGGER": 100000,
+  "SUMMARIZATION_KEEP_MESSAGES": 30,
+  "DEBUG_PRINT_PROMPT": false,
+
+  "REQUIRE_APPROVAL_GIT_COMMIT": true,
+  "REQUIRE_APPROVAL_GIT_BRANCH": true,
+  "REQUIRE_APPROVAL_GIT_STASH": true,
+  "REQUIRE_APPROVAL_EDIT": true,
+  "REQUIRE_APPROVAL_EXECUTE": true,
+
+  "GIT_AUTH_TYPE": "none",
+  "GIT_TOKEN": "",
+  "GIT_USERNAME": "",
+  "GIT_PASSWORD": "",
+  "GIT_SSH_KEY_PATH": "",
+
+  "AGENT_DATA_DIR": "./agent_data",
+  "WORKSPACE_BASE_DIR": "./workspaces",
+  "CLEANUP_WORKSPACE_ON_EXIT": true,
+  "APP_BASE_URL": "http://localhost:8001",
+  "MAX_CLONE_SIZE_MB": 500,
+  "GIT_CLONE_DEPTH": 1
+}

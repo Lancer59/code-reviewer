@@ -10,9 +10,10 @@ from langchain_core.tools import tool
 from deepagents import create_deep_agent
 from deepagents.backends import LocalShellBackend, CompositeBackend, StoreBackend
 from llm_factory import get_llm
+from config import cfg, cfg_bool, cfg_int
 from tools.git_tools import (
     git_status, git_diff, git_log, git_blame,
-    git_create_branch, git_commit, git_stash,
+    git_create_branch, git_commit, git_stash, git_push,
 )
 
 logger = logging.getLogger("review_agent")
@@ -21,12 +22,11 @@ _SKIP_DIRS = {
     ".git", "__pycache__", "node_modules", ".venv", "venv", "env",
     "dist", "build", ".next", ".nuxt", "coverage",
 }
-# Only code files in the map — no json/yaml/md/css to keep it lean
 _MAP_EXTENSIONS = {
     ".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go", ".rs", ".cs",
     ".cpp", ".c", ".h", ".rb", ".php", ".swift", ".kt", ".sh",
 }
-_MAP_CAP = 150  # max files in repo map
+_MAP_CAP = 150
 
 
 def _build_repo_map(workspace_path: str, repo_folder: str) -> str:
@@ -60,7 +60,7 @@ def _build_repo_map(workspace_path: str, repo_folder: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Compact record_finding tool — 5× smaller schema than 7-param version
+# Compact record_finding tool
 # ---------------------------------------------------------------------------
 
 @tool
@@ -86,7 +86,6 @@ def f(finding: str) -> str:
     if cat not in cat_map:
         return f"Error: CAT must be one of {list(cat_map)}"
 
-    # Parse file:line
     if ":" in file_line:
         fp, ln = file_line.rsplit(":", 1)
         try:
@@ -96,7 +95,6 @@ def f(finding: str) -> str:
     else:
         fp, ln = file_line, 0
 
-    # Return structured pipe string for UI layer to parse
     return f"FINDING|{fp}|{ln}|{crit_map[crit]}|{cat_map[cat]}|{title}|{desc}|{fix}"
 
 
@@ -133,14 +131,19 @@ When the user asks to fix an issue:
 3. Once all requested fixes are applied, ask the user: "Do you want me to use git tools to verify the changes and create a branch/commit?"
 4. If the user agrees, delegate to the `git-agent` to handle git operations.
 """
+
 GIT_AGENT_PROMPT = """You handle git operations for applied code fixes.
 
 Workflow:
-1. Try `git_status` to verify the codebase changes. If it fails (not a git repo), tell the user and stop.
-2. `git_create_branch` - create a new branch named fix/<short-slug>
-3. `git_commit` - commit with a conventional-commits message (e.g. "fix(security): move API key to env var")
+1. `git_status` — verify changes exist. If it fails (not a git repo or path error), tell the user and stop.
+2. `git_create_branch` — create a new branch named fix/<short-slug>
+3. `git_commit` — commit with a conventional-commits message (e.g. "fix(security): move API key to env var")
+4. `git_push` — push the fix branch to origin so the user can open a PR.
 
-Return a one-line summary: "Committed on branch <name>: <message>"""
+IMPORTANT: Always use the exact repo_path provided below. Never use relative paths or folder names.
+
+Return a one-line summary: "Committed and pushed branch <name>: <message>"
+"""
 
 FILE_SCANNER_PROMPT = """You are a code quality scanner. Read the given file and return ALL issues found.
 
@@ -168,17 +171,17 @@ Be aggressive — flag anything suspicious. False positives are acceptable."""
 
 
 # ---------------------------------------------------------------------------
-# interrupt_on config from env vars
+# interrupt_on config
 # ---------------------------------------------------------------------------
 
 def _build_interrupt_on() -> dict:
-    """Build interrupt_on from env vars. All write tools require approval by default."""
+    """Build interrupt_on from config. All write tools require approval by default."""
     gates = {
-        "git_commit":        os.getenv("REQUIRE_APPROVAL_GIT_COMMIT",  "true").lower() != "false",
-        "git_create_branch": os.getenv("REQUIRE_APPROVAL_GIT_BRANCH",  "true").lower() != "false",
-        "git_stash":         os.getenv("REQUIRE_APPROVAL_GIT_STASH",   "true").lower() != "false",
-        "edit_file":         os.getenv("REQUIRE_APPROVAL_EDIT",        "true").lower() != "false",
-        "execute":           os.getenv("REQUIRE_APPROVAL_EXECUTE",     "true").lower() != "false",
+        "git_commit":        cfg_bool("REQUIRE_APPROVAL_GIT_COMMIT",  True),
+        "git_create_branch": cfg_bool("REQUIRE_APPROVAL_GIT_BRANCH",  True),
+        "git_stash":         cfg_bool("REQUIRE_APPROVAL_GIT_STASH",   True),
+        "edit_file":         cfg_bool("REQUIRE_APPROVAL_EDIT",        True),
+        "execute":           cfg_bool("REQUIRE_APPROVAL_EXECUTE",     True),
     }
     return {
         name: {"allowed_decisions": ["approve", "reject"]}
@@ -213,23 +216,21 @@ async def create_review_agent(
 
     resolved_prompt = (
         REVIEW_PROMPT
-        + f"\n\nTarget folder: `{repo_folder}/` — use relative paths."
+        + f"\n\nTarget folder: `{repo_folder}/` — use relative paths for findings."
+        + f"\n\nFull workspace path (use this exact value as `repo_path` for ALL git tool calls): `{workspace_path}`"
         + repo_map_section
     )
 
-    # Git subagent — strictly handles git operations after edits are applied
     git_subagent = {
         "name": "git-agent",
         "description": (
-            "Handles git operations (branching and committing). Use this ONLY AFTER you have "
+            "Handles git operations (branching, committing, pushing). Use this ONLY AFTER you have "
             "already applied code fixes and the user has explicitly agreed to branch and commit them."
         ),
-        "system_prompt": GIT_AGENT_PROMPT,
-        "tools": [git_create_branch, git_commit, git_stash, git_status, git_diff],
-        # interrupt_on inherited from main agent — git_commit and git_create_branch will pause for approval
+        "system_prompt": GIT_AGENT_PROMPT + f"\n\nRepo path (use this exact string for repo_path in every tool call): `{workspace_path}`",
+        "tools": [git_create_branch, git_commit, git_stash, git_status, git_diff, git_push],
     }
 
-    # File Scanner subagent — reads individual files in isolation, keeps main context clean
     file_scanner_subagent = {
         "name": "file-scanner",
         "description": (
@@ -238,10 +239,8 @@ async def create_review_agent(
             "style issues, and missing documentation. Provide the file path."
         ),
         "system_prompt": FILE_SCANNER_PROMPT,
-        # tools provided by the backend (read_file, grep_search)
     }
 
-    # Security Scanner subagent — dedicated OWASP pass in isolated context
     security_scanner_subagent = {
         "name": "security-scanner",
         "description": (
@@ -250,28 +249,27 @@ async def create_review_agent(
             "broken auth, and insecure patterns. Use once per review for the security pass."
         ),
         "system_prompt": SECURITY_SCANNER_PROMPT,
-        # tools provided by the backend (read_file, grep_search)
     }
 
     core_tools = [f, git_status, git_diff, git_log, git_blame]
 
-    def make_backend(runtime):
-        return CompositeBackend(
-            default=shell_backend,
-            routes={"/memories/": StoreBackend(runtime, namespace=lambda ctx, uid=user_id: (uid,))}
-        )
+    # Build backend as instance (callable factory deprecated in deepagents 0.7.0)
+    backend = CompositeBackend(
+        default=shell_backend,
+        routes={"/memories/": StoreBackend(namespace=lambda ctx, uid=user_id: (uid,))}
+    )
 
     interrupt_on = _build_interrupt_on()
 
     agent = create_deep_agent(
         model=llm,
         system_prompt=resolved_prompt,
-        backend=make_backend,
+        backend=backend,
         checkpointer=checkpointer,
         store=store,
         tools=core_tools,
         subagents=[git_subagent, file_scanner_subagent, security_scanner_subagent],
         interrupt_on=interrupt_on,
     )
-    agent._iteration_limit = iteration_limit or int(os.getenv("ITERATION_LIMIT", "150"))
+    agent._iteration_limit = iteration_limit or cfg_int("ITERATION_LIMIT", 150)
     return agent
