@@ -1,100 +1,77 @@
-# Mounting Dev Companion inside another FastAPI application
+# Mounting Dev Companion in another FastAPI application
 
-Dev Companion exposes two sub-applications:
-
-- **Chainlit UI** — the chat interface (WebSocket + HTTP)
-- **Dashboard API** — REST endpoints at `/dashboard/api/...` + static files at `/dashboard/static/`
-
-Both can be mounted inside a host FastAPI app using Starlette's sub-application mounting.
+Dev Companion ships a single `create_app()` factory in `run.py`. Call it, get a FastAPI app back, mount it. That's it.
 
 ---
 
-## Prerequisites
-
-- Python 3.11+
-- Both apps run in the **same process** (Chainlit's WebSocket handling requires this)
-- FastAPI ≥ 0.100, Chainlit ≥ 1.0, Starlette ≥ 0.27
-- The `code-reviewer` directory must be importable (add it to `PYTHONPATH` or install as a package)
-
----
-
-## Quick Start — Mount at `/reviewer`
+## Quick Start
 
 ```python
-# host_app.py
-import sys
-import os
-
-# Make code-reviewer importable
-sys.path.insert(0, "/path/to/code-reviewer")
-
-# Point config at a dedicated config file BEFORE importing any Dev Companion module
-os.environ["CONFIG_FILE"] = "/path/to/reviewer-config.json"
-
-from contextlib import asynccontextmanager
+# your_app.py
 from fastapi import FastAPI
-from chainlit.utils import mount_chainlit
-from dashboard.api import dashboard_app
+from run import create_app          # adjust import path as needed
 
+app = FastAPI(title="My Platform")
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    yield
-    # Dev Companion cleanup on shutdown
-    try:
-        import reviewer_ui
-        if reviewer_ui._checkpointer_conn is not None:
-            await reviewer_ui._checkpointer_conn.close()
-    except Exception:
-        pass
-
-
-host_app = FastAPI(title="My Platform", lifespan=lifespan)
-
-
-# ── Your existing routes ──────────────────────────────────────────────────────
-@host_app.get("/api/v1/status")
-async def status():
+# Your existing routes
+@app.get("/api/status")
+def status():
     return {"ok": True}
 
+# Mount Dev Companion at /reviewer
+reviewer = create_app(
+    mount_path="/reviewer",
+    config_file="/etc/reviewer/config.json",   # optional — see Config section
+)
+app.mount("/reviewer", reviewer)
+```
 
-# ── Mount Dev Companion dashboard at /reviewer/dashboard ─────────────────────
-for route in dashboard_app.routes:
-    route.path = "/reviewer" + route.path
-host_app.routes.extend(dashboard_app.routes)
+Run:
+```bash
+uvicorn your_app:app --host 0.0.0.0 --port 8000
+```
 
+That's all. Dev Companion is now live at:
 
-# ── Mount Chainlit UI at /reviewer ────────────────────────────────────────────
-mount_chainlit(
-    app=host_app,
-    target="/path/to/code-reviewer/reviewer_ui.py",
-    path="/reviewer",
+| URL | What |
+|-----|------|
+| `http://localhost:8000/reviewer/` | Chat UI |
+| `http://localhost:8000/reviewer/dashboard` | Dashboard |
+| `http://localhost:8000/reviewer/dashboard/api/findings` | REST API |
+| `http://localhost:8000/reviewer/health` | Health check |
+
+---
+
+## `create_app()` signature
+
+```python
+def create_app(
+    mount_path: str = "",
+    config_file: str | None = None,
+    title: str = "Dev Companion",
+) -> FastAPI:
+```
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `mount_path` | `""` | URL prefix the app is mounted at. Must match the path in `app.mount()`. E.g. `"/reviewer"`. Leave empty for root mount. |
+| `config_file` | `None` | Absolute path to a `config.json`. Sets `CONFIG_FILE` env var before any module is imported, so all Dev Companion config is isolated from the host app. |
+| `title` | `"Dev Companion"` | FastAPI app title (shows in `/docs`). |
+
+---
+
+## Config isolation via config.json
+
+The cleanest way to configure Dev Companion when mounting is a `config.json` file. Pass its path to `create_app()` and it takes priority over all environment variables.
+
+```python
+reviewer = create_app(
+    mount_path="/reviewer",
+    config_file="/etc/reviewer/config.json",
 )
 ```
 
-Run with:
-```bash
-uvicorn host_app:host_app --host 0.0.0.0 --port 8000
-```
-
-The app is now available at:
-- Chat UI: `http://localhost:8000/reviewer`
-- Dashboard: `http://localhost:8000/reviewer/dashboard`
-- Dashboard API: `http://localhost:8000/reviewer/dashboard/api/findings`
-
----
-
-## Configuration via config.json
-
-When mounting inside a host app, use `config.json` to isolate Dev Companion's configuration from the host app's environment variables:
-
-```python
-# Set this BEFORE importing any Dev Companion module
-import os
-os.environ["CONFIG_FILE"] = "/path/to/reviewer-config.json"
-```
-
-Then create `/path/to/reviewer-config.json` (copy from `config.json.example`):
+Minimal `config.json` (copy from `config.json.example` for the full list):
 
 ```json
 {
@@ -102,10 +79,11 @@ Then create `/path/to/reviewer-config.json` (copy from `config.json.example`):
   "AZURE_OPENAI_ENDPOINT": "https://your-resource.openai.azure.com/",
   "AZURE_OPENAI_DEPLOYMENT_NAME": "gpt-4o",
   "AGENT_DATA_DIR": "/var/data/reviewer/agent_data",
-  "WORKSPACE_BASE_DIR": "/var/data/reviewer/workspaces",
+  "WORKSPACE_BASE_DIR": "/tmp/reviewer/workspaces",
   "APP_BASE_URL": "https://myplatform.com/reviewer",
   "CHAINLIT_USER": "admin",
-  "CHAINLIT_PASSWORD": "your-secure-password"
+  "CHAINLIT_PASSWORD": "your-secure-password",
+  "CLEANUP_WORKSPACE_ON_EXIT": true
 }
 ```
 
@@ -113,71 +91,65 @@ Config lookup order: `config.json` → environment variables → built-in defaul
 
 ---
 
-## Path Configuration
+## Standalone (no host app)
 
-When mounted at a sub-path, set `APP_BASE_URL` so dashboard links in the review summary point to the correct URL:
+`run.py` also exposes a `standalone` app object for running Dev Companion on its own:
 
-```json
-{
-  "APP_BASE_URL": "https://myplatform.com/reviewer"
-}
+```bash
+uvicorn run:standalone --host 0.0.0.0 --port 8001
+```
+
+Or in Python:
+```python
+import uvicorn
+from run import standalone
+uvicorn.run(standalone, host="0.0.0.0", port=8001)
 ```
 
 ---
 
-## Database Isolation
+## Lifespan merging
 
-By default Dev Companion writes SQLite databases to `./agent_data/`. When running alongside other apps, point it at a dedicated directory via `config.json`:
-
-```json
-{
-  "AGENT_DATA_DIR": "/var/data/reviewer/agent_data"
-}
-```
-
----
-
-## Authentication
-
-Dev Companion uses Chainlit's built-in password auth (`CHAINLIT_USER` / `CHAINLIT_PASSWORD`). This is independent of your host app's auth.
-
-**Option A — Keep separate auth (simplest)**
-Users log in to Dev Companion with the Chainlit credentials. No integration needed.
-
-**Option B — Bypass Chainlit auth (trusted internal tool)**
-Remove the `@cl.password_auth_callback` decorator from `reviewer_ui.py`. Chainlit will skip the login screen. Protect the `/reviewer` path with your host app's middleware instead.
-
-**Option C — Custom auth callback**
-Replace the `auth_callback` in `reviewer_ui.py` with one that validates against your own user store:
+`create_app()` manages its own lifespan (closes the SQLite checkpointer on shutdown). If your host app also has a lifespan, merge them:
 
 ```python
-@cl.password_auth_callback
-async def auth_callback(username: str, password: str):
-    if await my_auth_service.verify(username, password):
-        return cl.User(identifier=username, metadata={"role": "user"})
-    return None
+from contextlib import asynccontextmanager
+from fastapi import FastAPI
+from run import create_app
+
+reviewer_app = create_app(mount_path="/reviewer")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Your startup
+    await my_db.connect()
+    yield
+    # Your shutdown
+    await my_db.disconnect()
+    # Dev Companion shutdown (already handled internally, but safe to call again)
+    try:
+        import reviewer_ui
+        if reviewer_ui._checkpointer_conn is not None:
+            await reviewer_ui._checkpointer_conn.close()
+    except Exception:
+        pass
+
+app = FastAPI(lifespan=lifespan)
+app.mount("/reviewer", reviewer_app)
 ```
 
 ---
 
-## Lifespan Merging
+## sys.path
 
-Dev Companion's lifespan closes the SQLite checkpointer connection on shutdown. Merge it with your host app's lifespan as shown in the Quick Start example above.
+`run.py` automatically adds its own directory to `sys.path` so all Dev Companion imports resolve correctly regardless of where your host app runs from. No manual `sys.path` manipulation needed.
 
 ---
 
-## Known Limitations
+## Reverse proxy (nginx / Azure Application Gateway)
 
-**Single process required**
-Chainlit uses WebSockets and in-process state. Both the host app and Dev Companion must run in the same uvicorn process.
+When mounted at `/reviewer`, WebSocket connections go to `/reviewer/ws`. Make sure your proxy passes WebSocket upgrade headers:
 
-**Single replica**
-Dev Companion uses SQLite. SQLite does not support concurrent writes from multiple processes. Keep the deployment to a single container replica.
-
-**WebSocket path**
-Chainlit's WebSocket connects to `/reviewer/ws` when mounted at `/reviewer`. Ensure your reverse proxy passes WebSocket upgrade headers for this path.
-
-Nginx example:
 ```nginx
 location /reviewer/ {
     proxy_pass http://localhost:8000/reviewer/;
@@ -185,36 +157,34 @@ location /reviewer/ {
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "upgrade";
     proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
 }
 ```
 
 ---
 
-## Azure Container Apps — Recommended Setup
+## Azure App Service
 
-```yaml
-# container-app.yaml (simplified)
-properties:
-  template:
-    containers:
-      - name: code-reviewer
-        image: myregistry.azurecr.io/code-reviewer:latest
-        env:
-          - name: AGENT_DATA_DIR
-            value: /app/agent_data
-          - name: WORKSPACE_BASE_DIR
-            value: /app/workspaces
-          - name: APP_BASE_URL
-            value: https://code-reviewer.myenv.azurecontainerapps.io
-          - name: CLEANUP_WORKSPACE_ON_EXIT
-            value: "true"
-        volumeMounts:
-          - volumeName: agent-data
-            mountPath: /app/agent_data
-    volumes:
-      - name: agent-data
-        storageType: AzureFile
-        storageName: my-azure-files-storage
-```
+Set these in **Configuration → Application settings**:
 
-The Azure Files share at `/app/agent_data` persists `dashboard.db`, `checkpoints_lg.db`, and `chainlit_ui.db` across container restarts and redeployments. The `workspaces/` directory stays ephemeral in-container — cloned repos are deleted on session end.
+| Key | Value |
+|-----|-------|
+| `AGENT_DATA_DIR` | `/home/agent_data` (persistent storage on App Service) |
+| `WORKSPACE_BASE_DIR` | `/tmp/workspaces` (ephemeral) |
+| `APP_BASE_URL` | `https://your-app.azurewebsites.net/reviewer` |
+| `CLEANUP_WORKSPACE_ON_EXIT` | `true` |
+| `AZURE_OPENAI_API_KEY` | your key |
+| `AZURE_OPENAI_ENDPOINT` | your endpoint |
+| `AZURE_OPENAI_DEPLOYMENT_NAME` | your deployment |
+| `CHAINLIT_USER` | your username |
+| `CHAINLIT_PASSWORD` | your password |
+
+Or use a `config.json` stored in `/home/` (persistent) and pass its path to `create_app()`.
+
+---
+
+## Known limitations
+
+- **Single process** — Chainlit requires both the UI and API to run in the same process.
+- **Single replica** — SQLite doesn't support concurrent writes from multiple instances. Use one replica, or migrate `dashboard/db.py` to PostgreSQL for horizontal scaling.
+- **`os._exit(0)`** — Dev Companion's standalone lifespan calls `os._exit(0)` on shutdown to force-kill uvicorn. When mounted inside a host app, the `create_app()` lifespan does **not** call `os._exit(0)` — it only closes the DB connection, leaving clean shutdown to the host.
