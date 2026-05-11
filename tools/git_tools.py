@@ -373,10 +373,8 @@ async def git_push(repo_path: str, remote: str = "origin", branch: str = "") -> 
         ) else remote_url
 
         try:
-            result = repo.git.custom_environment(**{
-                "GIT_TERMINAL_PROMPT": "0",
-                "GIT_ASKPASS": "echo",
-            }).push(push_url, f"{target_branch}:{target_branch}", "--porcelain")
+            with repo.git.custom_environment(GIT_TERMINAL_PROMPT="0", GIT_ASKPASS="echo"):
+                result = repo.git.push(push_url, f"{target_branch}:{target_branch}", "--porcelain")
 
             for line in result.splitlines():
                 if line.startswith("!"):
