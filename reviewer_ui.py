@@ -352,7 +352,7 @@ async def _init_agent_session(workspace: str) -> None:
             await dl.update_thread(
                 thread_id=cl.context.session.thread_id,
                 name=thread_name,
-                metadata={"thread_id": thread_id, "workspace": workspace}
+                metadata={"thread_id": thread_id, "workspace": workspace, "repo_url": repo_url}
             )
 
         task_list = cl.TaskList()
@@ -432,8 +432,22 @@ async def on_chat_resume(thread):
 
     thread_id = meta.get("thread_id")
     workspace = meta.get("workspace", "")
-    if not thread_id or not workspace:
-        await cl.Message(content="⚠️ Could not restore session.").send()
+
+    if not thread_id:
+        await cl.Message(content="⚠️ Could not restore session — missing thread ID.").send()
+        return
+
+    # If the workspace no longer exists (cloned repo was cleaned up), offer to re-clone
+    if not workspace or not os.path.exists(workspace):
+        repo_url = meta.get("repo_url", "")
+        repo_hint = f" (`{repo_url}`)" if repo_url else ""
+        await cl.Message(
+            content=(
+                f"⚠️ The workspace for this session no longer exists{repo_hint}.\n\n"
+                "Cloned repositories are removed when a session ends. "
+                "To continue working on this repo, start a **new chat** and clone it again."
+            )
+        ).send()
         return
 
     try:
@@ -454,6 +468,14 @@ async def on_chat_resume(thread):
         task_list = cl.TaskList()
         await task_list.send()
         cl.user_session.set("task_list", task_list)
+
+        project_folder = os.path.basename(workspace)
+        await cl.Message(
+            content=(
+                f"✅ Session restored — **`{project_folder}`**\n\n"
+                "You can continue asking questions or say **`review`** to run a fresh review."
+            )
+        ).send()
     except Exception as e:
         await cl.Message(content=f"❌ Error resuming: {e}").send()
 
