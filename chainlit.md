@@ -1,6 +1,6 @@
 # 🔍 Dev Companion
 
-An AI-powered code review agent built on [deepagents](https://github.com/langchain-ai/deepagents) + Chainlit. Point it at any local repository and it produces structured findings with criticality levels, categories, and actionable fix suggestions.
+An AI-powered code review agent. Point it at any repository and it produces structured findings with criticality levels, categories, and actionable fix suggestions.
 
 ---
 
@@ -8,26 +8,27 @@ An AI-powered code review agent built on [deepagents](https://github.com/langcha
 
 View findings by criticality and category, token observability, session history, and export reports (HTML / XLSX).
 
-> The dashboard is only available when running via `uvicorn app:app --port 8001`. If running via `chainlit run reviewer_ui.py`, this link won't work.
-
 ---
 
 ## Getting Started
 
-1. Enter the **folder name** of the project you want to review (must be a sibling directory to `code-reviewer/`)
-2. Type **`review`** to start a full review
-3. After the review, say **`fix #1`**, **`fix all critical`**, or **`fix auth.py`** to apply fixes
+1. Enter the **repository URL** (and optionally a branch) — e.g. `https://github.com/org/repo` or `https://github.com/org/repo develop`
+2. Enter your **Personal Access Token** (or type `skip` for public repos)
+3. Type **`review`** to start a full review
+4. After the review, say **`fix #1`**, **`fix all critical`**, or **`fix auth.py`** to apply fixes
 
 ---
 
 ## What it does
 
+- **Clones your repo** — securely, using your PAT (never stored)
 - **Plans the review** — creates a task list (security pass, bug pass, performance, etc.)
 - **Delegates to subagents** — file reading and security scanning happen in isolated subagents, keeping the main context clean
 - **Records every finding** — criticality, category, file, line, description, and fix suggestion
 - **Shows live progress** — finding count updates in real time as the review runs
-- **Offers to fix** — after review, estimates fix cost per finding and applies fixes via the git-agent subagent
+- **Offers to fix** — after review, estimates fix cost per finding and applies fixes
 - **Diff + Undo** — every file edit shows a diff with an Undo button
+- **Pushes fix branch** — commits and pushes a `fix/` branch so you can open a PR
 
 ---
 
@@ -49,7 +50,7 @@ View findings by criticality and category, token observability, session history,
 |-------|------|
 | `file-scanner` | Reads a single file, returns all quality issues |
 | `security-scanner` | Dedicated OWASP Top 10 + secrets pass |
-| `git-agent` | Creates branch, applies fix, commits |
+| `git-agent` | Creates branch, applies fix, commits, pushes |
 
 ---
 
@@ -58,5 +59,5 @@ View findings by criticality and category, token observability, session history,
 | File | Purpose |
 |------|---------|
 | `agent_data/chainlit_ui.db` | Chat threads & message history |
-| `agent_data/checkpoints_lg.db` | LangGraph agent state per thread |
+| `agent_data/checkpoints_lg.db` | Agent state per thread |
 | `agent_data/dashboard.db` | Findings, telemetry, review sessions |

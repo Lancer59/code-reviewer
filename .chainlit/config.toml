@@ -30,11 +30,24 @@ favorites = false
 
 [UI]
 name = "Dev Companion"
+description = "AI-powered code review agent"
 cot = "full"
 confirm_new_chat = true
 alert_style = "classic"
-logo_file_url = ""
-default_avatar_file_url = ""
+logo_file_url = "/public/logo.svg"
+default_avatar_file_url = "/public/avatar.svg"
+favicon = "/public/favicon.svg"
+hide_cot = false
+# Hides the "Built with Chainlit" watermark in the footer
+show_readme_as_default = true
+watermark = false
+
+[UI.theme]
+    default = "dark"
+    [UI.theme.dark]
+        background = "#0f1117"
+        paper = "#1a1d2e"
+        primary = "#6366f1"
 
 [meta]
 generated_by = "2.10.0"
