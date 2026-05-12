@@ -95,14 +95,33 @@ def _configure_git_auth(repo: Repo) -> None:
 
 
 def _inject_pat_into_url(repo_url: str, pat: str) -> str:
-    """Inject a PAT into an HTTPS git URL."""
+    """
+    Inject a PAT into an HTTPS git URL.
+
+    Handles:
+    - Standard:   https://github.com/org/repo
+               -> https://<pat>@github.com/org/repo
+    - Azure DevOps (clean):
+                  https://dev.azure.com/org/proj/_git/repo
+               -> https://org:<pat>@dev.azure.com/org/proj/_git/repo
+    - Azure DevOps (with embedded username):
+                  https://smghosh@dev.azure.com/org/proj/_git/repo
+               -> https://org:<pat>@dev.azure.com/org/proj/_git/repo
+    """
     repo_url = repo_url.strip().rstrip("/")
     if not repo_url.startswith("https://"):
         raise ValueError("Only HTTPS URLs are supported for cloud clone.")
-    if "dev.azure.com" in repo_url:
+
+    # Strip any embedded username (e.g. https://user@host/...) before injecting
+    # to avoid producing double-@ URLs like https://org:pat@user@dev.azure.com/...
+    repo_url = re.sub(r"https://[^@/]+@", "https://", repo_url)
+
+    if "dev.azure.com" in repo_url or "visualstudio.com" in repo_url:
+        # Azure DevOps format: https://org:<pat>@dev.azure.com/<org>/...
         m = re.match(r"https://dev\.azure\.com/([^/]+)/", repo_url)
         org = m.group(1) if m else "org"
         return repo_url.replace("https://", f"https://{org}:{pat}@")
+
     return repo_url.replace("https://", f"https://{pat}@")
 
 
